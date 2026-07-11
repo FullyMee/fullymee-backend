@@ -16,11 +16,13 @@ router.delete('/rooms/:roomId/scheduled/:confessionId', authenticate, confession
 router.get('/rooms/my', authenticate, confessionController.getMyRooms);
 router.get('/rooms/public', authenticate, confessionController.getPublicRooms);
 router.get('/rooms/:roomId/members', authenticate, confessionController.getRoomMembers);
+router.get('/rooms/:roomId/audio-token', authenticate, confessionController.getAudioUploadToken);
 router.get('/posts/my', authenticate, confessionController.getMyConfessions);
 router.get('/rooms/recommendations', authenticate, confessionController.getRecommendations);
 
 router.get('/rooms/:roomId/confessions', authenticate, confessionController.listConfessions);
 router.post('/rooms/:roomId/confessions', authenticate, confessionController.postConfession);
+router.get('/rooms/:roomId/confessions/:confessionId/audio-url', authenticate, confessionController.getConfessionAudioUrl);
 
 router.get('/rooms/:roomId/confessions/:confessionId/replies', authenticate, confessionController.listReplies);
 router.post('/rooms/:roomId/confessions/:confessionId/replies', authenticate, confessionController.postReply);
@@ -38,4 +40,3 @@ router.post('/', authenticate, confessionController.createConfession);
 router.get('/', authenticate, confessionController.listConfessionsFeed);
 
 module.exports = router;
-

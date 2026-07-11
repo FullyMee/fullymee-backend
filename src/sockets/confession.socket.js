@@ -9,8 +9,10 @@ const roomSchema = z.object({
 
 const postSchema = z.object({
     roomId: z.number().int().positive(),
-    content: z.string().min(1).max(200),
-    scheduledAt: z.string().datetime().optional()
+    content: z.string().trim().min(1, 'Confession content or audio title is required').max(200),
+    scheduledAt: z.string().datetime().optional(),
+    audioPublicId: z.string().trim().min(1).max(240).optional(),
+    audioDuration: z.coerce.number().min(1).max(30).optional()
 });
 
 const replySchema = z.object({
@@ -161,7 +163,9 @@ function registerConfessionSocket(io) {
                     userId,
                     roomId: parsed.data.roomId,
                     content: parsed.data.content,
-                    scheduledAt: parsed.data.scheduledAt || null
+                    scheduledAt: parsed.data.scheduledAt || null,
+                    audioPublicId: parsed.data.audioPublicId || null,
+                    audioDuration: parsed.data.audioDuration || null
                 });
                 return safeCallback({ ok: true, ...result });
             } catch (err) {

@@ -24,8 +24,10 @@ const {
     rememberRoomAlias
 } = require('./bloomFilter.service');
 const conversationService = require('./conversation.service');
+const audioService = require('./audio.service');
 
 const emitter = new EventEmitter();
+const MAX_AUDIO_DURATION_SECONDS = Number(process.env.AUDIO_MAX_DURATION_SECONDS || 30);
 
 function normalizeCategory(value) {
     return String(value || 'general')
@@ -212,11 +214,20 @@ function sanitizeRoom(room, alias, { userId = null, includeJoinCode = false } = 
 }
 
 function sanitizeConfession(post, viewerState = {}) {
+    const audioMeta = post && post.audioMeta ? post.audioMeta : {};
+    const hasAudio = !!audioMeta.publicId;
     return {
         confessionId: post.id,
         roomId: post.roomId,
         alias: post.alias,
-        content: post.content,
+        content: post.content || '',
+        hasAudio,
+        audio: hasAudio || audioMeta.duration ? {
+            available: hasAudio,
+            duration: audioMeta.duration || null,
+            expiresAt: audioMeta.expiresAt || null,
+            pitchShift: audioMeta.pitchShift || null
+        } : null,
         createdAt: post.createdAt,
         reactionCount: post.likesCount || post.reactionCount || 0,
         likesCount: post.likesCount || 0,
@@ -226,6 +237,16 @@ function sanitizeConfession(post, viewerState = {}) {
         likedByViewer: !!viewerState.likedByViewer,
         viewerChatRequestStatus: viewerState.viewerChatRequestStatus || null
     };
+}
+
+async function cleanupAudioMeta(audioMeta) {
+    const publicId = audioMeta && audioMeta.publicId;
+    if (!publicId) return;
+    try {
+        await audioService.deleteAudio(publicId);
+    } catch (err) {
+        console.error('Failed to cleanup confession audio:', err && err.message ? err.message : err);
+    }
 }
 
 function sanitizeReply(reply, viewerState = {}) {
@@ -1256,11 +1277,12 @@ async function listMyConfessions({ userId, limit = 50 }) {
     });
 }
 
-async function postConfession({ userId, roomId, content, scheduledAt = null }) {
+async function postConfession({ userId, roomId, content, scheduledAt = null, audioPublicId = null, audioDuration = null }) {
     const uid = Number(userId);
     const rid = Number(roomId);
     const text = String(content || '').trim();
-    if (!text) throw createServiceError('EMPTY_CONTENT', 'Confession content is required.', 400);
+    const audioId = String(audioPublicId || '').trim();
+    if (!text) throw createServiceError('EMPTY_CONTENT', 'Confession content or audio title is required.', 400);
 
     const MIN_SCHEDULE_MS = 5 * 60 * 1000;
     const MAX_SCHEDULE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -1284,18 +1306,33 @@ async function postConfession({ userId, roomId, content, scheduledAt = null }) {
     const postRate = getRateLimitConfig('confession_post');
     await enforceActionLimit({ userId: uid, action: 'confession_post', ...postRate });
 
+    let audioMeta = null;
+    if (audioId) {
+        audioMeta = await audioService.verifyUploadedAudio({
+            publicId: audioId,
+            userId: uid,
+            roomId: rid,
+            clientDuration: audioDuration
+        });
+        if (!audioMeta || Number(audioMeta.duration || 0) < 1 || Number(audioMeta.duration || 0) > MAX_AUDIO_DURATION_SECONDS) {
+            throw createServiceError('INVALID_AUDIO', 'Invalid audio duration.', 400);
+        }
+    }
+
     const spamResult = await detectSpamContent({
         userId: uid,
         roomId: rid,
         type: 'confession',
-        content: text
+        content: text || `audio:${audioId}`
     });
     if (spamResult.isSpam) {
+        await cleanupAudioMeta(audioMeta);
         throw createServiceError('SPAM_DETECTED', 'Please avoid repeating the same content.', 429);
     }
 
     const moderation = moderateContent(text);
     if (moderation.action === 'block') {
+        await cleanupAudioMeta(audioMeta);
         await createModerationQueueItem({
             roomId: rid,
             targetType: 'confession',
@@ -1328,6 +1365,7 @@ async function postConfession({ userId, roomId, content, scheduledAt = null }) {
         roomId: rid,
         alias: member.alias,
         content: text,
+        audioMeta,
         author: uid,
         likesCount: 0,
         contentHash: spamResult.contentHash,
@@ -1373,7 +1411,13 @@ async function postConfession({ userId, roomId, content, scheduledAt = null }) {
                 confessionId,
                 scheduledAt: scheduledDate,
                 alias: member.alias,
-                content: text
+                content: text,
+                audio: audioMeta ? {
+                    available: true,
+                    duration: audioMeta.duration || null,
+                    expiresAt: audioMeta.expiresAt || null,
+                    pitchShift: audioMeta.pitchShift || null
+                } : null
             },
             moderationWarning: moderation.action === 'flag' ? moderation.userWarning : ''
         };
@@ -1436,6 +1480,59 @@ async function listConfessions({ userId, roomId, limit = 50, sortBy = 'ranked' }
     }
 
     return posts.map((post) => sanitizeConfession(post, viewerStateMap.get(Number(post.id)) || {}));
+}
+
+async function getAudioUploadToken({ userId, roomId }) {
+    const uid = Number(userId);
+    const rid = Number(roomId);
+    if (!uid) throw createServiceError('INVALID_USER', 'Invalid user', 401);
+    await getRoomAndMembership({ userId: uid, roomId: rid });
+    return audioService.generateUploadToken({ userId: uid, roomId: rid });
+}
+
+async function getConfessionAudioUrl({ userId, roomId, confessionId }) {
+    const uid = Number(userId);
+    const rid = Number(roomId);
+    const cid = Number(confessionId);
+    if (!uid) throw createServiceError('INVALID_USER', 'Invalid user', 401);
+    await getRoomAndMembership({ userId: uid, roomId: rid });
+
+    const post = await ConfessionPost.findOne({
+        id: cid,
+        roomId: rid,
+        isPublished: true,
+        isHidden: false,
+        moderationStatus: { $in: ['approved', 'flagged'] }
+    })
+        .select({ _id: 0, id: 1, audioMeta: 1 })
+        .lean();
+
+    if (!post) {
+        throw createServiceError('CONFESSION_NOT_FOUND', 'Confession not found.', 404);
+    }
+
+    const audioMeta = post.audioMeta || {};
+    if (!audioMeta.publicId) {
+        throw createServiceError('AUDIO_NOT_AVAILABLE', 'Audio is no longer available.', 410);
+    }
+    if (audioMeta.expiresAt && new Date(audioMeta.expiresAt).getTime() <= Date.now()) {
+        throw createServiceError('AUDIO_NOT_AVAILABLE', 'Audio is no longer available.', 410);
+    }
+
+    let format = 'webm';
+    if (audioMeta.mimeType) {
+        const parts = audioMeta.mimeType.split('/');
+        if (parts.length === 2) {
+            format = parts[1];
+            if (format === 'mpeg') format = 'mp3'; // audio/mpeg -> mp3
+        }
+    }
+
+    return audioService.generateSignedPlayUrl({
+        publicId: audioMeta.publicId,
+        pitchShift: audioMeta.pitchShift,
+        format
+    });
 }
 
 async function postReply({ userId, roomId, confessionId, content }) {
@@ -2163,7 +2260,7 @@ async function listMyScheduledConfessions({ userId, roomId }) {
         isPublished: false,
         scheduleStatus: { $in: ['pending', 'confirming'] }
     })
-        .select({ _id: 0, id: 1, content: 1, alias: 1, scheduledAt: 1, scheduleStatus: 1, confirmExpiresAt: 1, createdAt: 1 })
+        .select({ _id: 0, id: 1, content: 1, alias: 1, scheduledAt: 1, scheduleStatus: 1, confirmExpiresAt: 1, createdAt: 1, audioMeta: 1 })
         .sort({ scheduledAt: 1 })
         .lean();
 
@@ -2174,7 +2271,13 @@ async function listMyScheduledConfessions({ userId, roomId }) {
         scheduledAt: post.scheduledAt,
         scheduleStatus: post.scheduleStatus,
         confirmExpiresAt: post.confirmExpiresAt || null,
-        createdAt: post.createdAt
+        createdAt: post.createdAt,
+        audio: post.audioMeta && (post.audioMeta.publicId || post.audioMeta.duration) ? {
+            available: !!post.audioMeta.publicId,
+            duration: post.audioMeta.duration || null,
+            expiresAt: post.audioMeta.expiresAt || null,
+            pitchShift: post.audioMeta.pitchShift || null
+        } : null
     }));
 }
 
@@ -2205,6 +2308,20 @@ async function cancelScheduledConfession({ userId, confessionId, roomId }) {
     const cid = Number(confessionId);
     const rid = Number(roomId);
 
+    const post = await ConfessionPost.findOne({
+        id: cid,
+        roomId: rid,
+        author: uid,
+        isPublished: false,
+        scheduleStatus: { $in: ['pending', 'confirming'] }
+    })
+        .select({ _id: 0, id: 1, audioMeta: 1 })
+        .lean();
+
+    if (!post) {
+        throw createServiceError('SCHEDULED_CONFESSION_NOT_FOUND', 'Scheduled confession not found or already published.', 404);
+    }
+
     const result = await ConfessionPost.updateOne(
         {
             id: cid,
@@ -2220,6 +2337,7 @@ async function cancelScheduledConfession({ userId, confessionId, roomId }) {
         throw createServiceError('SCHEDULED_CONFESSION_NOT_FOUND', 'Scheduled confession not found or already published.', 404);
     }
 
+    await cleanupAudioMeta(post.audioMeta);
     return { cancelled: true, confessionId: cid };
 }
 
@@ -2236,7 +2354,7 @@ async function publishDueScheduledConfessions(getOnlineUsers) {
         scheduleStatus: 'pending',
         scheduledAt: { $lte: now }
     })
-        .select({ _id: 0, id: 1, roomId: 1, author: 1, alias: 1, content: 1, scheduledAt: 1,
+        .select({ _id: 0, id: 1, roomId: 1, author: 1, alias: 1, content: 1, scheduledAt: 1, audioMeta: 1,
             shardKey: 1, contentHash: 1, moderationStatus: 1, moderationSeverity: 1,
             moderationReasons: 1, sentimentScore: 1, rankingScore: 1, isHidden: 1,
             likesCount: 1, replyCount: 1, reactionCount: 1, createdAt: 1, updatedAt: 1 })
@@ -2256,6 +2374,11 @@ async function publishDueScheduledConfessions(getOnlineUsers) {
                 confessionId: post.id,
                 roomId: Number(post.roomId),
                 content: post.content,
+                audio: post.audioMeta && (post.audioMeta.publicId || post.audioMeta.duration) ? {
+                    available: !!post.audioMeta.publicId,
+                    duration: post.audioMeta.duration || null,
+                    expiresAt: post.audioMeta.expiresAt || null
+                } : null,
                 scheduledAt: post.scheduledAt,
                 confirmExpiresAt
             });
@@ -2303,6 +2426,8 @@ module.exports = {
     listMyConfessions,
     postConfession,
     listConfessions,
+    getAudioUploadToken,
+    getConfessionAudioUrl,
     postReply,
     listReplies,
     reactToTarget,

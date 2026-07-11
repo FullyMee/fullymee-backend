@@ -28,6 +28,10 @@ if (String(process.env.ENABLE_CONFESSION_SCHEDULER_WORKER || 'true').toLowerCase
     require('./workers/confessionScheduler.worker');
 }
 
+if (String(process.env.ENABLE_AUDIO_EXPIRY_WORKER || 'true').toLowerCase() !== 'false') {
+    require('./workers/audioExpiry.worker');
+}
+
 const PORT = process.env.PORT || 5000;
 const server = http.createServer(app);
 const SHUTDOWN_TIMEOUT_MS = Number(process.env.SHUTDOWN_TIMEOUT_MS || 10000);
