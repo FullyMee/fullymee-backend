@@ -13,13 +13,19 @@ const userSchema = new mongoose.Schema(
         },
         interests: [{ type: String, trim: true, lowercase: true }],
         email: { type: String, trim: true, lowercase: true, unique: true, sparse: true },
+        googleSub: { type: String, trim: true, unique: true, sparse: true, index: true },
+        authProviders: {
+            type: [String],
+            enum: ['email', 'google'],
+            default: []
+        },
         role: {
             type: String,
             enum: ['user', 'admin'],
             default: 'user',
             index: true
         },
-            tokenVersion: { type: Number, default: 0, index: true },
+        tokenVersion: { type: Number, default: 0, index: true },
         createdAt: { type: Date, default: Date.now }
     },
     { versionKey: false }

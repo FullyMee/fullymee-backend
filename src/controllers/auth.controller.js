@@ -20,6 +20,11 @@ const VERIFY_OTP_PUBLIC_ERRORS = new Set([
     'Invalid OTP',
     authService.OTP_LOCKED_ERROR_MESSAGE
 ]);
+const REFRESH_PUBLIC_ERROR_CODES = new Set([
+    'REFRESH_INVALID',
+    'REFRESH_MISSING',
+    'REFRESH_REVOKED'
+]);
 
 function issueSessionCookies(res, authToken, refreshToken) {
     if (!res) return;
@@ -128,9 +133,14 @@ exports.refreshSession = async (req, res) => {
         return res.status(200).json({ user });
     } catch (err) {
         clearSessionCookies(res);
-        const message = err && err.message ? err.message : 'Failed to refresh session';
-        console.error('refreshSession failed:', err);
-        return res.status(401).json({ error: message });
+        const code = err && err.code ? String(err.code) : 'REFRESH_FAILED';
+        if (!REFRESH_PUBLIC_ERROR_CODES.has(code)) {
+            console.error('refreshSession failed:', err);
+        }
+        return res.status(401).json({
+            error: 'Session expired. Please sign in again.',
+            code
+        });
     }
 };
 
@@ -142,11 +152,15 @@ exports.googleSignIn = async (req, res) => {
         }
 
         const { token, user } = await authService.loginWithGoogle(credential);
+        clearSessionCookies(res);
         issueSessionCookies(res, token, await authService.createRefreshTokenForUser(user.id, user.tokenVersion, req));
         return res.status(200).json({ user });
     } catch (err) {
         if (err && err.code === 'GOOGLE_SIGNIN_NO_ACCOUNT') {
-            return res.status(404).json({ error: err.message });
+            return res.status(404).json({ error: err.message, code: err.code });
+        }
+        if (err && err.code === 'GOOGLE_ACCOUNT_CONFLICT') {
+            return res.status(409).json({ error: err.message, code: err.code });
         }
 
         const message = err && err.message ? err.message : '';
@@ -157,7 +171,7 @@ exports.googleSignIn = async (req, res) => {
             message === 'Invalid Google credential' ||
             message === 'Unable to validate Google credential'
         ) {
-            return res.status(400).json({ error: message });
+            return res.status(400).json({ error: message, code: err && err.code ? err.code : 'GOOGLE_SIGNIN_INVALID' });
         }
 
         console.error('googleSignIn failed:', err);

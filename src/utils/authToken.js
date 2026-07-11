@@ -201,6 +201,33 @@ function validateJwtConfig() {
     }
 }
 
+function validateCookieConfig() {
+    const production = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+    const secure = parseBoolean(process.env.AUTH_COOKIE_SECURE, production);
+    const sameSite = String(process.env.AUTH_COOKIE_SAMESITE || 'lax').trim().toLowerCase();
+    const frontendOrigin = String(process.env.FRONTEND_ORIGIN || process.env.CLIENT_ORIGIN || '').trim();
+    const apiOrigin = String(process.env.API_ORIGIN || process.env.BACKEND_ORIGIN || '').trim();
+    let crossSite = false;
+
+    try {
+        if (frontendOrigin && apiOrigin) {
+            crossSite = new URL(frontendOrigin).origin !== new URL(apiOrigin).origin;
+        }
+    } catch (_) {
+        crossSite = false;
+    }
+
+    if (sameSite === 'none' && !secure) {
+        const message = 'AUTH_COOKIE_SAMESITE=none requires AUTH_COOKIE_SECURE=true.';
+        if (production) throw new Error(message);
+        console.warn(message);
+    }
+
+    if (production && crossSite && (sameSite !== 'none' || !secure)) {
+        throw new Error('Cross-site frontend/backend auth requires AUTH_COOKIE_SAMESITE=none and AUTH_COOKIE_SECURE=true.');
+    }
+}
+
 function buildAuthClaims(user = {}) {
     return {
         userId: Number(user.userId || user.id),
@@ -352,6 +379,7 @@ module.exports = {
     getSocketToken,
     parseJwtAlgorithms,
     validateJwtConfig,
+    validateCookieConfig,
     signAuthToken,
     verifyAuthToken,
     setAuthCookie,

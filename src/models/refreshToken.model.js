@@ -9,7 +9,8 @@ const refreshTokenSchema = new mongoose.Schema(
     userAgent: { type: String, trim: true, default: null },
     createdAt: { type: Date, default: Date.now },
     expiresAt: { type: Date, required: true },
-    revokedAt: { type: Date, default: null }
+    revokedAt: { type: Date, default: null },
+    reuseDetectedAt: { type: Date, default: null }
   },
   { versionKey: false }
 );

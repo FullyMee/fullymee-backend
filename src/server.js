@@ -2,7 +2,7 @@ const app = require('./app');
 const http = require('http');
 const { Server } = require('socket.io');
 const { connectDB, mongoose } = require('./config/db');
-const { validateJwtConfig } = require('./utils/authToken');
+const { validateJwtConfig, validateCookieConfig } = require('./utils/authToken');
 const Conversation = require('./models/conversation.model');
 const Message = require('./models/message.model');
 const ConversationRead = require('./models/conversationRead.model');
@@ -43,6 +43,7 @@ function getRequiredEnv(name) {
 
 function validateRuntimeConfig() {
     validateJwtConfig();
+    validateCookieConfig();
 }
 
 async function ensureMessageTtlIndex() {

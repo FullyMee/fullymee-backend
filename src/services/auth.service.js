@@ -19,6 +19,20 @@ const {
 const OTP_LOCKED_ERROR_MESSAGE = 'Too many invalid attempts. Try again later';
 const REFRESH_TOKEN_EXPIRES_MS = Number(process.env.REFRESH_TOKEN_EXPIRES_MS || 30 * 24 * 60 * 60 * 1000);
 const AUTH_TOKEN_EXPIRES_IN = String(process.env.JWT_EXPIRES_IN || '15m').trim();
+const EXPECTED_REFRESH_ERROR_CODES = new Set([
+    'REFRESH_INVALID',
+    'REFRESH_MISSING',
+    'REFRESH_REVOKED',
+    'REFRESH_REUSE'
+]);
+const ANONYMOUS_USERNAME_ADJECTIVES = [
+    'silent', 'hidden', 'curious', 'brave', 'calm', 'fuzzy', 'clever', 'wild', 'gentle', 'misty',
+    'rapid', 'serene', 'lively', 'nimble', 'bold', 'cosmic', 'bright', 'quiet', 'amber', 'velvet'
+];
+const ANONYMOUS_USERNAME_NOUNS = [
+    'tiger', 'falcon', 'otter', 'fox', 'panda', 'raven', 'dolphin', 'lynx', 'wolf', 'sparrow',
+    'leopard', 'koala', 'eagle', 'hawk', 'seal', 'jaguar', 'panther', 'manta', 'cobra', 'orca'
+];
 
 function logAuthEvent(event, details = {}) {
     try {
@@ -39,6 +53,10 @@ function generateRandomOTP() {
 
 function hashRefreshToken(token) {
     return crypto.createHash('sha256').update(String(token || '')).digest('hex');
+}
+
+function randomFrom(values) {
+    return values[Math.floor(Math.random() * values.length)];
 }
 
 function getClientIp(req) {
@@ -77,11 +95,33 @@ async function revokeRefreshTokensForUser(userId) {
     }
 }
 
+async function handleRefreshTokenReuse(existing) {
+    if (!existing || !existing.userId) return;
+
+    await RefreshToken.updateOne(
+        { tokenHash: existing.tokenHash },
+        { $set: { reuseDetectedAt: new Date() } }
+    );
+    await User.updateOne(
+        { id: Number(existing.userId) },
+        { $inc: { tokenVersion: 1 } }
+    );
+    await revokeRefreshTokensForUser(existing.userId);
+    metrics.recordAuthTokenVersionMismatch();
+}
+
 async function rotateRefreshToken(rawToken, req) {
     const existingHash = hashRefreshToken(rawToken);
     const existing = await RefreshToken.findOne({ tokenHash: existingHash }).lean();
 
-    if (!existing || existing.revokedAt || !existing.expiresAt || existing.expiresAt.getTime() <= Date.now()) {
+    if (existing && existing.revokedAt) {
+        await handleRefreshTokenReuse(existing);
+        const err = new Error('Refresh token reuse detected');
+        err.code = 'REFRESH_REUSE';
+        throw err;
+    }
+
+    if (!existing || !existing.expiresAt || existing.expiresAt.getTime() <= Date.now()) {
         const err = new Error('Refresh token is invalid or expired');
         err.code = 'REFRESH_INVALID';
         throw err;
@@ -128,10 +168,12 @@ async function refreshSession(req) {
         return { user, authToken, refreshToken };
     } catch (err) {
         metrics.recordAuthRefreshFailure();
-        logAuthEvent('refresh_failed', {
-            error: err && err.code ? String(err.code) : 'UNKNOWN',
-            message: err && err.message ? String(err.message) : 'Refresh failed'
-        });
+        if (!EXPECTED_REFRESH_ERROR_CODES.has(err && err.code)) {
+            logAuthEvent('refresh_failed', {
+                error: err && err.code ? String(err.code) : 'UNKNOWN',
+                message: err && err.message ? String(err.message) : 'Refresh failed'
+            });
+        }
         throw err;
     }
 }
@@ -153,6 +195,11 @@ function buildUsernameFromEmail(email, fallbackSuffix = '') {
     const cleaned = local.toLowerCase().replace(/[^a-z0-9._]/g, '');
     const base = cleaned.length >= 3 ? cleaned : `user${fallbackSuffix || ''}`;
     return base.slice(0, 20);
+}
+
+function createAnonymousUsernameCandidate() {
+    const suffix = crypto.randomInt(1000, 10000);
+    return `${randomFrom(ANONYMOUS_USERNAME_ADJECTIVES)}.${randomFrom(ANONYMOUS_USERNAME_NOUNS)}${suffix}`;
 }
 
 async function getUniqueUsername(base, suffixSeed = 0) {
@@ -223,11 +270,18 @@ async function createUserByEmail(email, username) {
                 id: nextId,
                 email,
                 username: candidate,
+                authProviders: ['email'],
                 role: 'user'
             });
             rememberEmail(email);
             rememberUsername(candidate);
-            return { id: created.id, email: created.email, username: created.username, role: created.role };
+            return {
+                id: created.id,
+                email: created.email,
+                username: created.username,
+                role: created.role,
+                tokenVersion: created.tokenVersion
+            };
         } catch (err) {
             if (err && err.code === 11000) {
                 if (String(err.message || '').toLowerCase().includes('username') || (err.keyPattern && err.keyPattern.username)) {
@@ -244,6 +298,57 @@ async function createUserByEmail(email, username) {
                     if (existing) {
                         return existing;
                     }
+                }
+            }
+            throw err;
+        }
+    }
+
+    throw new Error('Unable to allocate a unique username');
+}
+
+async function createGoogleUser(email, googleSub) {
+    const nextId = await getNextSequence('users');
+
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+        const candidate = createAnonymousUsernameCandidate();
+        const usernameExists = mightHaveUsername(candidate)
+            ? await User.exists({ username: candidate })
+            : null;
+        if (usernameExists) continue;
+
+        try {
+            const created = await User.create({
+                id: nextId,
+                email,
+                googleSub,
+                username: candidate,
+                authProviders: ['google'],
+                role: 'user'
+            });
+            rememberEmail(email);
+            rememberUsername(candidate);
+            return {
+                id: created.id,
+                email: created.email,
+                username: created.username,
+                role: created.role,
+                tokenVersion: created.tokenVersion,
+                googleSub: created.googleSub
+            };
+        } catch (err) {
+            if (err && err.code === 11000) {
+                const duplicateEmail = String(err.message || '').toLowerCase().includes('email') || (err.keyPattern && err.keyPattern.email);
+                const duplicateGoogleSub = String(err.message || '').toLowerCase().includes('googlesub') || (err.keyPattern && err.keyPattern.googleSub);
+                const duplicateUsername = String(err.message || '').toLowerCase().includes('username') || (err.keyPattern && err.keyPattern.username);
+                if (duplicateUsername) continue;
+                if (duplicateEmail || duplicateGoogleSub) {
+                    const existing = await User.findOne({
+                        $or: [{ email }, { googleSub }]
+                    })
+                        .select({ _id: 0, id: 1, email: 1, username: 1, role: 1, tokenVersion: 1, googleSub: 1 })
+                        .lean();
+                    if (existing) return existing;
                 }
             }
             throw err;
@@ -312,7 +417,7 @@ async function verifyGoogleCredential(idToken) {
         throw new Error('Google email is not verified');
     }
 
-    return { email };
+    return { email, googleSub: String(payload.sub || '').trim() };
 }
 
 exports.generateOTP = async (email) => {
@@ -473,7 +578,8 @@ exports.verifyOTP = async (email, otp, usernameInput) => {
         userId: user.id,
         email: user.email || normalizedEmail,
         username: user.username || normalizedUsername,
-        role: user.role
+        role: user.role,
+        tokenVersion: user.tokenVersion
     });
 
     metrics.recordAuthLoginSuccess();
@@ -484,31 +590,57 @@ exports.verifyOTP = async (email, otp, usernameInput) => {
 
 exports.loginWithGoogle = async (credential) => {
     try {
-        const { email } = await verifyGoogleCredential(credential);
+        const { email, googleSub } = await verifyGoogleCredential(credential);
+        if (!googleSub) {
+            throw new Error('Invalid Google credential');
+        }
 
-        const user = mightHaveEmail(email)
+        const googleUser = await User.findOne({ googleSub })
+            .select({ _id: 0, id: 1, email: 1, username: 1, role: 1, tokenVersion: 1, googleSub: 1 })
+            .lean();
+        const emailUser = mightHaveEmail(email)
             ? await User.findOne({ email })
-                .select({ _id: 0, id: 1, email: 1, username: 1, role: 1 })
+                .select({ _id: 0, id: 1, email: 1, username: 1, role: 1, tokenVersion: 1, googleSub: 1 })
                 .lean()
             : null;
 
-        if (!user) {
-            const err = new Error('No account found. Please sign up with email OTP first.');
-            err.code = 'GOOGLE_SIGNIN_NO_ACCOUNT';
+        if (googleUser && emailUser && Number(googleUser.id) !== Number(emailUser.id)) {
+            const err = new Error('This Google account is already linked to another user.');
+            err.code = 'GOOGLE_ACCOUNT_CONFLICT';
             throw err;
+        }
+
+        let user = googleUser || emailUser;
+
+        if (!user) {
+            user = await createGoogleUser(email, googleSub);
+        } else if (!user.googleSub) {
+            const updated = await User.findOneAndUpdate(
+                { id: Number(user.id), $or: [{ googleSub: null }, { googleSub: { $exists: false } }] },
+                {
+                    $set: { googleSub },
+                    $addToSet: { authProviders: 'google' }
+                },
+                {
+                    new: true,
+                    projection: { _id: 0, id: 1, email: 1, username: 1, role: 1, tokenVersion: 1, googleSub: 1 }
+                }
+            ).lean();
+            user = updated || user;
         }
 
         const token = signAuthToken({
             userId: user.id,
             email: user.email,
             username: user.username || '',
-            role: user.role
+            role: user.role,
+            tokenVersion: user.tokenVersion
         });
 
         metrics.recordAuthLoginSuccess();
         return { token, user };
     } catch (err) {
-        if (err && err.code === 'GOOGLE_SIGNIN_NO_ACCOUNT') {
+        if (err && (err.code === 'GOOGLE_SIGNIN_NO_ACCOUNT' || err.code === 'GOOGLE_ACCOUNT_CONFLICT')) {
             throw err;
         }
         metrics.recordAuthGoogleSigninFailure();
