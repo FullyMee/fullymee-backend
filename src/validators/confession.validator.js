@@ -26,8 +26,10 @@ exports.joinRoomByCodeSchema = z.object({
 });
 
 exports.postConfessionSchema = z.object({
-    content: z.string().trim().min(1).max(200),
-    scheduledAt: z.string().datetime().optional()
+    content: z.string().trim().min(1, 'Confession content or audio title is required').max(200),
+    scheduledAt: z.string().datetime().optional(),
+    audioPublicId: z.string().trim().min(1).max(240).optional(),
+    audioDuration: z.coerce.number().min(1).max(30).optional()
 });
 
 exports.postReplySchema = z.object({

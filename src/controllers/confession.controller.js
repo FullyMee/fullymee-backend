@@ -241,11 +241,43 @@ exports.postConfession = async (req, res) => {
             userId,
             roomId: params.roomId,
             content: body.content,
-            scheduledAt: body.scheduledAt || null
+            scheduledAt: body.scheduledAt || null,
+            audioPublicId: body.audioPublicId || null,
+            audioDuration: body.audioDuration || null
         });
         res.status(201).json(result);
     } catch (err) {
         handleControllerError(res, err, 'Failed to publish confession');
+    }
+};
+
+exports.getAudioUploadToken = async (req, res) => {
+    try {
+        const userId = req.user && req.user.userId;
+        const params = parseOrThrow(roomIdParamsSchema, req.params || {});
+        const result = await confessionService.getAudioUploadToken({
+            userId,
+            roomId: params.roomId
+        });
+        res.status(200).json(result);
+    } catch (err) {
+        handleControllerError(res, err, 'Failed to create audio upload token');
+    }
+};
+
+exports.getConfessionAudioUrl = async (req, res) => {
+    try {
+        const userId = req.user && req.user.userId;
+        const roomParams = parseOrThrow(roomIdParamsSchema, req.params || {});
+        const confessionParams = parseOrThrow(confessionIdParamsSchema, req.params || {});
+        const result = await confessionService.getConfessionAudioUrl({
+            userId,
+            roomId: roomParams.roomId,
+            confessionId: confessionParams.confessionId
+        });
+        res.status(200).json(result);
+    } catch (err) {
+        handleControllerError(res, err, 'Failed to load audio');
     }
 };
 
@@ -438,4 +470,3 @@ exports.listConfessionsFeed = async (req, res) => {
         handleControllerError(res, err, 'Failed to fetch confessions feed');
     }
 };
-
