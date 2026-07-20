@@ -9,6 +9,7 @@ const { requestOtpLimiter, verifyOtpLimiter, googleSigninLimiter } = require('..
    This keeps authentication available for many users behind one shared IP while blocking abuse. */
 router.post('/request-otp', ...requestOtpLimiter, authController.requestOTP);
 router.get('/check-username', authController.checkUsername);
+router.get('/csrf', authController.getCsrfToken);
 
 router.post('/verify-otp', ...verifyOtpLimiter, authController.verifyOTP);
 router.post('/google-signin', ...googleSigninLimiter, authController.googleSignIn);
