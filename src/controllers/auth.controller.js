@@ -6,7 +6,8 @@ const {
     setRefreshCookie,
     setCsrfCookie,
     clearSessionCookies,
-    signAuthToken
+    signAuthToken,
+    getCookieValue
 } = require('../utils/authToken');
 
 const VERIFY_OTP_PUBLIC_ERRORS = new Set([
@@ -33,6 +34,15 @@ function issueSessionCookies(res, authToken, refreshToken) {
     const csrfToken = crypto.randomBytes(32).toString('hex');
     setCsrfCookie(res, csrfToken);
 }
+
+exports.getCsrfToken = (req, res) => {
+    let token = getCookieValue(req.headers.cookie, process.env.CSRF_COOKIE_NAME || 'csrf_token');
+    if (!token) {
+        token = crypto.randomBytes(32).toString('hex');
+        setCsrfCookie(res, token);
+    }
+    res.json({ csrfToken: token });
+};
 
 function isDuplicateUsernameError(err) {
     return !!(
