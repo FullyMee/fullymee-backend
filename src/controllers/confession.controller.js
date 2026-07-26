@@ -309,7 +309,9 @@ exports.postReply = async (req, res) => {
             userId,
             roomId: roomParams.roomId,
             confessionId: confessionParams.confessionId,
-            content: body.content
+            content: body.content,
+            parentReplyId: body.parentReplyId || null,
+            parentAlias: body.parentAlias || null
         });
         res.status(201).json(result);
     } catch (err) {

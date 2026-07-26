@@ -33,7 +33,9 @@ exports.postConfessionSchema = z.object({
 });
 
 exports.postReplySchema = z.object({
-    content: z.string().trim().min(1).max(1500)
+    content: z.string().trim().min(1).max(1500),
+    parentReplyId: z.coerce.number().int().positive().nullable().optional(),
+    parentAlias: z.string().trim().max(40).nullable().optional()
 });
 
 exports.reactSchema = z.object({
