@@ -256,6 +256,8 @@ function sanitizeReply(reply, viewerState = {}) {
         roomId: reply.roomId,
         alias: reply.alias,
         content: reply.content,
+        parentReplyId: reply.parentReplyId || null,
+        parentAlias: reply.parentAlias || null,
         createdAt: reply.createdAt,
         reactionCount: reply.reactionCount,
         moderationStatus: reply.moderationStatus,
@@ -1535,10 +1537,12 @@ async function getConfessionAudioUrl({ userId, roomId, confessionId }) {
     });
 }
 
-async function postReply({ userId, roomId, confessionId, content }) {
+async function postReply({ userId, roomId, confessionId, content, parentReplyId = null, parentAlias = null }) {
     const uid = Number(userId);
     const rid = Number(roomId);
     const cid = Number(confessionId);
+    const pReplyId = parentReplyId ? Number(parentReplyId) : null;
+    const pAlias = parentAlias ? String(parentAlias).trim() : null;
     const text = String(content || '').trim();
     if (!text) throw createServiceError('EMPTY_CONTENT', 'Reply content is required.', 400);
 
@@ -1605,6 +1609,8 @@ async function postReply({ userId, roomId, confessionId, content }) {
         confessionId: cid,
         alias: member.alias,
         content: text,
+        parentReplyId: pReplyId,
+        parentAlias: pAlias,
         contentHash: spamResult.contentHash,
         author: uid,
         likesCount: 0,

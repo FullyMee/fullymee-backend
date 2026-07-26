@@ -21,6 +21,8 @@ const confessionReplySchema = new mongoose.Schema(
         rankingScore: { type: Number, default: 0 },
         isHidden: { type: Boolean, default: false, index: true },
         hiddenReason: { type: String, default: null, trim: true, maxlength: 200 },
+        parentReplyId: { type: Number, default: null, index: true },
+        parentAlias: { type: String, default: null, trim: true, maxlength: 40 },
         createdAt: { type: Date, default: Date.now, index: true },
         updatedAt: { type: Date, default: Date.now },
         lastEngagementAt: { type: Date, default: Date.now, index: true }
