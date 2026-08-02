@@ -15,6 +15,7 @@ const preferencesSchema = new mongoose.Schema(
 
         // Privacy & Safety
         hideJoinedRooms: { type: Boolean, default: false },
+        hideProfileGlobal: { type: Boolean, default: false },
         audioExpiry: {
             type: String,
             enum: ['never', '24h', '7d', '30d'],

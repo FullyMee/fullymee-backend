@@ -237,7 +237,15 @@ exports.getAllUsers = async (req, res) => {
         const offset = Math.max(0, Math.floor(Number(req.query && req.query.offset ? req.query.offset : 0) || 0));
         const paginate = String((req.query && req.query.paginate) || '').toLowerCase() === '1' || String((req.query && req.query.paginate) || '').toLowerCase() === 'true';
 
-        const filter = { id: { $ne: userId } };
+        // Include all users in search (including self) — but exclude profiles
+        // hidden globally UNLESS it's the viewer's own profile
+        const filter = {
+            $or: [
+                { id: userId },                                    // always include self
+                { 'preferences.hideProfileGlobal': { $ne: true } } // include non-hidden others
+            ]
+        };
+
         if (query) {
             filter.username = { $regex: query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' };
         }
