@@ -3,6 +3,9 @@ const router = express.Router();
 const { authenticate } = require('../middleware/auth.middleware');
 const authController = require("../controllers/auth.controller");
 const User = require('../models/user.model');
+const ConfessionPost = require('../models/confessionPost.model');
+const ConfessionReply = require('../models/confessionReply.model');
+const ConfessionRoomMember = require('../models/confessionRoomMember.model');
 const { z } = require('zod');
 const { isConfiguredAdminUser } = require('../utils/adminAccess');
 
@@ -133,6 +136,51 @@ router.put('/preferences', authenticate, async (req, res) => {
         }
         console.error('Failed to update user preferences:', err);
         return res.status(500).json({ error: 'Failed to update preferences' });
+    }
+});
+
+router.get('/:identifier/profile', authenticate, async (req, res) => {
+    try {
+        const identifier = String(req.params.identifier).trim();
+        let user = await User.findOne({ username: { $regex: new RegExp(`^${identifier}$`, 'i') } }).lean();
+
+        // If not found by username, let's check if it's an ID
+        if (!user && /^\d+$/.test(identifier)) {
+            user = await User.findOne({ id: Number(identifier) }).lean();
+        }
+
+        if (user) {
+            // It's a real user
+            const [confessions, replies, rooms] = await Promise.all([
+                ConfessionPost.countDocuments({ author: user.id, isPublished: true, isHidden: false }),
+                ConfessionReply.countDocuments({ author: user.id, isHidden: false }),
+                ConfessionRoomMember.countDocuments({ userId: user.id, status: 'active' })
+            ]);
+
+            return res.status(200).json({
+                isAlias: false,
+                username: user.username,
+                userId: user.id,
+                createdAt: user.createdAt,
+                stats: { confessions, rooms, replies }
+            });
+        } else {
+            // Treat as an alias
+            const [confessions, replies, roomsList] = await Promise.all([
+                ConfessionPost.countDocuments({ alias: identifier, isPublished: true, isHidden: false }),
+                ConfessionReply.countDocuments({ alias: identifier, isHidden: false }),
+                ConfessionPost.distinct('roomId', { alias: identifier, isPublished: true, isHidden: false })
+            ]);
+
+            return res.status(200).json({
+                isAlias: true,
+                username: identifier,
+                stats: { confessions, rooms: roomsList.length, replies }
+            });
+        }
+    } catch (err) {
+        console.error('Failed to fetch user profile:', err);
+        res.status(500).json({ error: 'Failed to fetch user profile' });
     }
 });
 
