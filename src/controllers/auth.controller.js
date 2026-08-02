@@ -231,11 +231,6 @@ exports.getSocketToken = async (req, res) => {
 
 exports.getAllUsers = async (req, res) => {
     try {
-        if (process.env.ENABLE_USER_DISCOVERY !== 'true') {
-            const paginate = String((req.query && req.query.paginate) || '').toLowerCase() === '1' || String((req.query && req.query.paginate) || '').toLowerCase() === 'true';
-            return res.status(200).json(paginate ? { items: [], hasMore: false } : []);
-        }
-
         const userId = req.user && req.user.userId;
         const query = String((req.query && req.query.q) || (req.query && req.query.search) || '').trim();
         const requestedLimit = Math.max(1, Math.min(100, Number(req.query && req.query.limit ? req.query.limit : 10) || 10));

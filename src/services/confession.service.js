@@ -864,38 +864,25 @@ async function joinRoom({
             }
         );
     } else {
-        let created = false;
-        let lastErr = null;
-        for (let i = 0; i < 6 && !created; i++) {
-            alias = await generateUniqueAlias(selectedRoom.id);
-            try {
-                await ConfessionRoomMember.create({
-                    roomId: selectedRoom.id,
-                    userId: uid,
-                    alias,
-                    isActive: true,
-                    joinedAt: new Date(),
-                    lastActiveAt: new Date(),
-                    joinSource
-                });
-                created = true;
-                rememberRoomAlias(selectedRoom.id, alias);
-            } catch (err) {
-                lastErr = err;
-                if (err && err.code === 11000) continue;
-                break;
-            }
-        }
-        if (!created) {
+        const userRec = await User.findOne({ id: uid }).select('username').lean();
+        alias = userRec && userRec.username ? userRec.username : `User${uid}`;
+        try {
+            await ConfessionRoomMember.create({
+                roomId: selectedRoom.id,
+                userId: uid,
+                alias,
+                isActive: true,
+                joinedAt: new Date(),
+                lastActiveAt: new Date(),
+                joinSource
+            });
+            rememberRoomAlias(selectedRoom.id, alias);
+        } catch (err) {
             await ConfessionRoom.updateOne(
                 { id: selectedRoom.id, currentUserCount: { $gt: 0 } },
                 { $inc: { currentUserCount: -1 } }
             );
-
-            if (lastErr && lastErr.code !== 11000) {
-                throw lastErr;
-            }
-            throw createServiceError('ALIAS_GENERATION_FAILED', 'Unable to allocate anonymous alias.', 500);
+            throw createServiceError('ROOM_JOIN_FAILED', 'Unable to join the room.', 500, { originalError: err });
         }
     }
 
