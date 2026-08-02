@@ -31,6 +31,7 @@ const profileUpdateSchema = z.object({
 
     // Privacy & Safety
     hideJoinedRooms: z.boolean().optional(),
+    hideProfileGlobal: z.boolean().optional(),
     audioExpiry: z.enum(['never', '24h', '7d', '30d']).optional(),
 });
 
@@ -52,6 +53,7 @@ function formatUserResponse(user, isAdmin) {
             chatRequestPermission: (user.preferences && user.preferences.chatRequestPermission) || 'everyone',
             limitNighttimeRequests: !!(user.preferences && user.preferences.limitNighttimeRequests),
             hideJoinedRooms: !!(user.preferences && user.preferences.hideJoinedRooms),
+            hideProfileGlobal: !!(user.preferences && user.preferences.hideProfileGlobal),
             audioExpiry: (user.preferences && user.preferences.audioExpiry) || 'never',
         }
     };
@@ -105,7 +107,7 @@ router.put('/preferences', authenticate, async (req, res) => {
         }
 
         // Preferences sub-doc fields — use dot-notation for partial updates
-        const prefFields = ['avatar', 'chatRequestPermission', 'limitNighttimeRequests', 'hideJoinedRooms', 'audioExpiry'];
+        const prefFields = ['avatar', 'chatRequestPermission', 'limitNighttimeRequests', 'hideJoinedRooms', 'hideProfileGlobal', 'audioExpiry'];
         for (const field of prefFields) {
             if (payload[field] !== undefined) {
                 updates[`preferences.${field}`] = payload[field];
@@ -139,45 +141,142 @@ router.put('/preferences', authenticate, async (req, res) => {
     }
 });
 
+const ChatRequest = require('../models/chatRequest.model');
+const Conversation = require('../models/conversation.model');
+
 router.get('/:identifier/profile', authenticate, async (req, res) => {
     try {
         const identifier = String(req.params.identifier).trim();
-        let user = await User.findOne({ username: { $regex: new RegExp(`^${identifier}$`, 'i') } }).lean();
+        const currentUserId = req.user.userId;
 
-        // If not found by username, let's check if it's an ID
-        if (!user && /^\d+$/.test(identifier)) {
-            user = await User.findOne({ id: Number(identifier) }).lean();
+        // Fetch current user details
+        const currentUser = await User.findOne({ id: currentUserId }).lean();
+        const currentUsername = currentUser?.username ? currentUser.username.toLowerCase() : null;
+
+        // 1. Check if identifier belongs to current logged-in user (isSelf)
+        let isSelf = false;
+        if (/^\d+$/.test(identifier) && Number(identifier) === currentUserId) {
+            isSelf = true;
+        } else if (currentUsername && identifier.toLowerCase() === currentUsername) {
+            isSelf = true;
+        } else {
+            // Check if identifier matches any room alias of the current user
+            const ownMember = await ConfessionRoomMember.findOne({
+                userId: currentUserId,
+                alias: { $regex: new RegExp(`^${identifier.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&')}$`, 'i') }
+            }).lean();
+            if (ownMember) {
+                isSelf = true;
+            }
         }
 
-        if (user) {
-            // It's a real user
-            const [confessions, replies, rooms] = await Promise.all([
-                ConfessionPost.countDocuments({ author: user.id, isPublished: true, isHidden: false }),
-                ConfessionReply.countDocuments({ author: user.id, isHidden: false }),
-                ConfessionRoomMember.countDocuments({ userId: user.id, status: 'active' })
-            ]);
-
+        if (isSelf) {
             return res.status(200).json({
-                isAlias: false,
-                username: user.username,
-                userId: user.id,
-                createdAt: user.createdAt,
-                stats: { confessions, rooms, replies }
+                isSelf: true,
+                userId: currentUserId,
+                username: currentUser?.username || identifier,
+                createdAt: currentUser?.createdAt
             });
+        }
+
+        // 2. Resolve target user or alias
+        const escapedIdentifier = identifier.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
+        let targetUser = await User.findOne({ username: { $regex: new RegExp(`^${escapedIdentifier}$`, 'i') } }).lean();
+        if (!targetUser && /^\d+$/.test(identifier)) {
+            targetUser = await User.findOne({ id: Number(identifier) }).lean();
+        }
+
+        // If not found directly, check if identifier is a room alias belonging to another user
+        if (!targetUser) {
+            const memberRec = await ConfessionRoomMember.findOne({
+                alias: { $regex: new RegExp(`^${escapedIdentifier}$`, 'i') }
+            }).lean();
+            if (memberRec) {
+                targetUser = await User.findOne({ id: memberRec.userId }).lean();
+            }
+        }
+
+        // 2b. Check if targetUser has hidden their profile globally
+        if (targetUser && targetUser.preferences?.hideProfileGlobal) {
+            return res.status(200).json({
+                isSelf: false,
+                isProfileHidden: true,
+                username: targetUser.username || identifier
+            });
+        }
+
+        const targetUserId = targetUser ? targetUser.id : null;
+
+        // 3. Check connection status (accepted chat request or active conversation)
+        let isConnected = false;
+        let conversationId = null;
+
+        if (targetUserId) {
+            const acceptedRequest = await ChatRequest.findOne({
+                $or: [
+                    { requesterUserId: currentUserId, targetUserId: targetUserId },
+                    { requesterUserId: targetUserId, targetUserId: currentUserId }
+                ],
+                status: 'accepted'
+            }).lean();
+
+            if (acceptedRequest) {
+                isConnected = true;
+                conversationId = acceptedRequest.conversationId || null;
+            }
+
+            if (!conversationId) {
+                const dmConv = await Conversation.findOne({
+                    type: 'dm',
+                    participants: { $all: [currentUserId, targetUserId] }
+                }).lean();
+                if (dmConv) {
+                    isConnected = true;
+                    conversationId = dmConv.id;
+                }
+            }
+        }
+
+        // 4. Calculate stats
+        let confessionsCount = 0;
+        let repliesCount = 0;
+        let roomsCount = 0;
+
+        if (targetUserId) {
+            const [confessions, replies, members] = await Promise.all([
+                ConfessionPost.countDocuments({ author: targetUserId, isPublished: true, isHidden: false }),
+                ConfessionReply.countDocuments({ author: targetUserId, isHidden: false }),
+                ConfessionRoomMember.countDocuments({ userId: targetUserId, isActive: true })
+            ]);
+            confessionsCount = confessions;
+            repliesCount = replies;
+            roomsCount = members;
         } else {
-            // Treat as an alias
+            // Pure alias stats fallback
             const [confessions, replies, roomsList] = await Promise.all([
                 ConfessionPost.countDocuments({ alias: identifier, isPublished: true, isHidden: false }),
                 ConfessionReply.countDocuments({ alias: identifier, isHidden: false }),
                 ConfessionPost.distinct('roomId', { alias: identifier, isPublished: true, isHidden: false })
             ]);
-
-            return res.status(200).json({
-                isAlias: true,
-                username: identifier,
-                stats: { confessions, rooms: roomsList.length, replies }
-            });
+            confessionsCount = confessions;
+            repliesCount = replies;
+            roomsCount = roomsList.length;
         }
+
+        return res.status(200).json({
+            isSelf: false,
+            isProfileHidden: false,
+            isConnected,
+            conversationId,
+            userId: targetUserId,
+            username: targetUser ? targetUser.username : identifier,
+            createdAt: targetUser ? targetUser.createdAt : null,
+            stats: {
+                confessions: confessionsCount,
+                rooms: roomsCount,
+                replies: repliesCount
+            }
+        });
     } catch (err) {
         console.error('Failed to fetch user profile:', err);
         res.status(500).json({ error: 'Failed to fetch user profile' });
