@@ -37,9 +37,13 @@ function getAllowedOrigins() {
 
 const allowedOrigins = getAllowedOrigins();
 
-/* Health check */
-app.get('/health', (req, res) => {
-    res.status(200).json({ status: 'ok' });
+/* Health check — supports root /health and /api/health for Render/Uptime monitors & pre-warming */
+app.get(['/health', '/api/health'], (req, res) => {
+    res.status(200).json({
+        status: 'ok',
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString()
+    });
 });
 
 /* Readiness check */
