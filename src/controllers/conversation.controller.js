@@ -6,23 +6,6 @@ exports.createDM = async (req, res) => {
     });
 };
 
-exports.getMyConversations = async (req, res) => {
-    try {
-        const userId = req.user.userId;
-
-        const conversations = await conversationService.getUserConversations(userId);
-
-        res.status(200).json(conversations);
-
-    } catch (err) {
-        console.error("Fetch Conversations Error:", err);
-
-        res.status(500).json({
-            error: "Failed to fetch conversations"
-        });
-    }
-};
-
 exports.getUnread = async (req, res) => {
     try {
         const userId = req.user.userId;
@@ -37,19 +20,6 @@ exports.getUnread = async (req, res) => {
         res.status(500).json({
             error: "Failed to fetch unread counts"
         });
-    }
-};
-
-exports.getConversations = async (req, res) => {
-    try {
-        const userId = req.user && req.user.userId;
-
-        const conversations = await conversationService.getUserConversations(userId);
-
-        res.status(200).json(conversations);
-    } catch (err) {
-        console.error("Failed to fetch conversations", err);
-        res.status(500).json({ error: "Failed to fetch conversations" });
     }
 };
 
@@ -114,9 +84,189 @@ exports.sendUserChatRequest = async (req, res) => {
         res.status(200).json(result);
     } catch (err) {
         if (err && Number.isFinite(err.status)) {
-            return res.status(err.status).json({ error: err.message || 'Failed to send chat request' });
+            return res.status(err.status).json({
+                error: err.message || 'Failed to send chat request',
+                code: err.code || undefined
+            });
         }
         console.error("Failed to send user chat request", err);
         res.status(500).json({ error: "Failed to send chat request" });
+    }
+};
+
+function handleConnectionError(res, err, fallbackMessage) {
+    if (err && Number.isFinite(err.status)) {
+        return res.status(err.status).json({
+            error: err.message || fallbackMessage,
+            code: err.code || undefined
+        });
+    }
+    console.error(fallbackMessage, err);
+    return res.status(500).json({ error: fallbackMessage });
+}
+
+exports.getMyConversations = async (req, res) => {
+    try {
+        const userId = req.user.userId;
+        const view = String((req.query && req.query.view) || 'active');
+        const conversations = await conversationService.getUserConversations(userId, { view });
+        res.status(200).json(conversations);
+    } catch (err) {
+        console.error("Fetch Conversations Error:", err);
+        res.status(500).json({ error: "Failed to fetch conversations" });
+    }
+};
+
+exports.getConversations = async (req, res) => {
+    try {
+        const userId = req.user && req.user.userId;
+        const view = String((req.query && req.query.view) || 'active');
+        const conversations = await conversationService.getUserConversations(userId, { view });
+        res.status(200).json(conversations);
+    } catch (err) {
+        console.error("Failed to fetch conversations", err);
+        res.status(500).json({ error: "Failed to fetch conversations" });
+    }
+};
+
+exports.getClosingNotes = async (req, res) => {
+    try {
+        res.status(200).json(conversationService.getClosingNotesCatalog());
+    } catch (err) {
+        handleConnectionError(res, err, 'Failed to load closing notes');
+    }
+};
+
+exports.getConversation = async (req, res) => {
+    try {
+        const userId = req.user && req.user.userId;
+        const conversationId = Number(req.params.conversationId);
+        if (!conversationId || Number.isNaN(conversationId)) {
+            return res.status(400).json({ error: 'Invalid conversationId' });
+        }
+        const conversation = await conversationService.getConversationById(userId, conversationId);
+        res.status(200).json({ conversation });
+    } catch (err) {
+        handleConnectionError(res, err, 'Failed to fetch conversation');
+    }
+};
+
+exports.endConnection = async (req, res) => {
+    try {
+        const userId = req.user && req.user.userId;
+        const conversationId = Number(req.params.conversationId);
+        if (!conversationId || Number.isNaN(conversationId)) {
+            return res.status(400).json({ error: 'Invalid conversationId' });
+        }
+
+        const closingNoteId = req.body && Object.prototype.hasOwnProperty.call(req.body, 'closingNoteId')
+            ? req.body.closingNoteId
+            : null;
+
+        const conversation = await conversationService.endConnection({
+            userId,
+            conversationId,
+            closingNoteId
+        });
+
+        res.status(200).json({ conversation });
+    } catch (err) {
+        handleConnectionError(res, err, 'Failed to end connection');
+    }
+};
+
+exports.pauseConnection = async (req, res) => {
+    try {
+        const userId = req.user && req.user.userId;
+        const conversationId = Number(req.params.conversationId);
+        if (!conversationId || Number.isNaN(conversationId)) {
+            return res.status(400).json({ error: 'Invalid conversationId' });
+        }
+
+        const conversation = await conversationService.pauseConnection({ userId, conversationId });
+        res.status(200).json({ conversation });
+    } catch (err) {
+        handleConnectionError(res, err, 'Failed to pause conversation');
+    }
+};
+
+exports.resumeConnection = async (req, res) => {
+    try {
+        const userId = req.user && req.user.userId;
+        const conversationId = Number(req.params.conversationId);
+        if (!conversationId || Number.isNaN(conversationId)) {
+            return res.status(400).json({ error: 'Invalid conversationId' });
+        }
+
+        const conversation = await conversationService.resumeConnection({ userId, conversationId });
+        res.status(200).json({ conversation });
+    } catch (err) {
+        handleConnectionError(res, err, 'Failed to resume conversation');
+    }
+};
+
+exports.archiveConnection = async (req, res) => {
+    try {
+        const userId = req.user && req.user.userId;
+        const conversationId = Number(req.params.conversationId);
+        if (!conversationId || Number.isNaN(conversationId)) {
+            return res.status(400).json({ error: 'Invalid conversationId' });
+        }
+
+        const conversation = await conversationService.archiveConnectionForUser({ userId, conversationId });
+        res.status(200).json({ conversation });
+    } catch (err) {
+        handleConnectionError(res, err, 'Failed to archive conversation');
+    }
+};
+
+exports.unarchiveConnection = async (req, res) => {
+    try {
+        const userId = req.user && req.user.userId;
+        const conversationId = Number(req.params.conversationId);
+        if (!conversationId || Number.isNaN(conversationId)) {
+            return res.status(400).json({ error: 'Invalid conversationId' });
+        }
+
+        const conversation = await conversationService.unarchiveConnectionForUser({ userId, conversationId });
+        res.status(200).json({ conversation });
+    } catch (err) {
+        handleConnectionError(res, err, 'Failed to unarchive conversation');
+    }
+};
+
+exports.deleteConnection = async (req, res) => {
+    try {
+        const userId = req.user && req.user.userId;
+        const conversationId = Number(req.params.conversationId);
+        if (!conversationId || Number.isNaN(conversationId)) {
+            return res.status(400).json({ error: 'Invalid conversationId' });
+        }
+
+        const result = await conversationService.deleteConnectionForUser({ userId, conversationId });
+        res.status(200).json(result);
+    } catch (err) {
+        handleConnectionError(res, err, 'Failed to delete conversation');
+    }
+};
+
+exports.reportConnection = async (req, res) => {
+    try {
+        const userId = req.user && req.user.userId;
+        const conversationId = Number(req.params.conversationId);
+        if (!conversationId || Number.isNaN(conversationId)) {
+            return res.status(400).json({ error: 'Invalid conversationId' });
+        }
+
+        const reason = req.body && req.body.reason ? String(req.body.reason) : '';
+        const conversation = await conversationService.reportAndEndConnection({
+            userId,
+            conversationId,
+            reason
+        });
+
+        res.status(200).json({ conversation });
+    } catch (err) {
+        handleConnectionError(res, err, 'Failed to report conversation');
     }
 };

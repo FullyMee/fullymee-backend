@@ -11,4 +11,15 @@ router.get('/unread', authenticate, conversationController.getUnread);
 router.get('/requests', authenticate, conversationController.getChatRequests);
 router.post('/requests/:requestId/respond', authenticate, conversationController.respondToChatRequest);
 
+/* Silent Exit / Manage Connection */
+router.get('/closing-notes', authenticate, conversationController.getClosingNotes);
+router.get('/:conversationId', authenticate, conversationController.getConversation);
+router.post('/:conversationId/end', authenticate, conversationController.endConnection);
+router.post('/:conversationId/pause', authenticate, conversationController.pauseConnection);
+router.post('/:conversationId/resume', authenticate, conversationController.resumeConnection);
+router.post('/:conversationId/archive', authenticate, conversationController.archiveConnection);
+router.post('/:conversationId/unarchive', authenticate, conversationController.unarchiveConnection);
+router.post('/:conversationId/report', authenticate, conversationController.reportConnection);
+router.delete('/:conversationId', authenticate, conversationController.deleteConnection);
+
 module.exports = router;

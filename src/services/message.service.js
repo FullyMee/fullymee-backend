@@ -10,29 +10,59 @@ function createMessageServiceError(message, status = 400) {
     return err;
 }
 
-async function getAccessibleConversation(conversationId, userId) {
+async function getAccessibleConversation(conversationId, userId, { forWrite = false } = {}) {
     const conversation = await Conversation.findOne({
         id: Number(conversationId),
         participants: Number(userId)
     })
-        .select({ _id: 0, id: 1, isArchived: 1, deletedAt: 1 })
+        .select({
+            _id: 0,
+            id: 1,
+            status: 1,
+            isArchived: 1,
+            deletedAt: 1,
+            participantMeta: 1,
+            closingNoteText: 1,
+            endedAt: 1
+        })
         .lean();
 
     if (!conversation) {
         throw createMessageServiceError('Conversation not found', 404);
     }
+
+    const meta = Array.isArray(conversation.participantMeta)
+        ? conversation.participantMeta.find((row) => Number(row.userId) === Number(userId))
+        : null;
+
+    if (meta && meta.isDeleted) {
+        throw createMessageServiceError('Conversation is no longer available', 410);
+    }
+
     if (conversation.deletedAt) {
         throw createMessageServiceError('Conversation is no longer available', 410);
     }
-    if (conversation.isArchived) {
-        throw createMessageServiceError('Conversation is archived', 409);
+
+    const status = conversation.status || 'ACTIVE';
+
+    if (forWrite) {
+        if (status === 'ENDED') {
+            const err = createMessageServiceError('This conversation has come to an end.', 409);
+            err.code = 'CONVERSATION_CLOSED';
+            throw err;
+        }
+        if (status === 'PAUSED') {
+            const err = createMessageServiceError('This conversation is paused.', 409);
+            err.code = 'CONVERSATION_PAUSED';
+            throw err;
+        }
     }
 
     return conversation;
 }
 
 exports.createMessage = async (conversationId, senderId, content, clientMessageId = null) => {
-    await getAccessibleConversation(conversationId, senderId);
+    await getAccessibleConversation(conversationId, senderId, { forWrite: true });
 
     const expiresAt = getMessageExpiresAt();
     const id = await getNextSequence('messages');
@@ -60,7 +90,8 @@ exports.createMessage = async (conversationId, senderId, content, clientMessageI
 };
 
 exports.fetchMessages = async (conversationId, userId, limit = null) => {
-    await getAccessibleConversation(conversationId, userId);
+    // Reads remain allowed after Silent Exit so both sides can see history + closing state
+    await getAccessibleConversation(conversationId, userId, { forWrite: false });
 
     const query = Message.find({
         conversationId,
@@ -85,7 +116,7 @@ exports.fetchMessages = async (conversationId, userId, limit = null) => {
 };
 
 exports.fetchMessagesAfter = async (conversationId, userId, lastMessageId) => {
-    await getAccessibleConversation(conversationId, userId);
+    await getAccessibleConversation(conversationId, userId, { forWrite: false });
 
     const rows = await Message.find({
         conversationId,

@@ -11,11 +11,23 @@ const {
     rememberDMConversation,
     rememberChatRequest
 } = require('./bloomFilter.service');
+const {
+    CONVERSATION_STATUS,
+    END_REASONS,
+    MAX_RECONNECTS,
+    DEFAULT_CLOSING_NOTE_TEXT,
+    CLOSING_NOTES,
+    resolveClosingNote,
+    getReconnectCooldownMs
+} = require('../constants/closingNotes');
 
 // Service-level emitter for conversation events
 const emitter = new EventEmitter();
 
 exports.emitter = emitter;
+exports.CLOSING_NOTES = CLOSING_NOTES;
+exports.DEFAULT_CLOSING_NOTE_TEXT = DEFAULT_CLOSING_NOTE_TEXT;
+exports.CONVERSATION_STATUS = CONVERSATION_STATUS;
 
 function toDisplayNamesMap(displayNames) {
     if (!displayNames || typeof displayNames !== 'object') return {};
@@ -53,6 +65,202 @@ function createConversationError(code, message, status = 400) {
     return err;
 }
 
+function buildDefaultParticipantMeta(participants = []) {
+    return (participants || []).map((userId) => ({
+        userId: Number(userId),
+        isArchived: false,
+        isDeleted: false,
+        archivedAt: null,
+        deletedAt: null,
+        lastSeenAt: null
+    })).filter((row) => row.userId);
+}
+
+function ensureParticipantMeta(conversation, participants) {
+    const existing = Array.isArray(conversation && conversation.participantMeta)
+        ? conversation.participantMeta
+        : [];
+    const byUserId = new Map(
+        existing
+            .filter((row) => row && Number(row.userId))
+            .map((row) => [Number(row.userId), row])
+    );
+
+    return (participants || []).map((rawUserId) => {
+        const userId = Number(rawUserId);
+        const current = byUserId.get(userId);
+        if (current) {
+            return {
+                userId,
+                isArchived: !!current.isArchived,
+                isDeleted: !!current.isDeleted,
+                archivedAt: current.archivedAt || null,
+                deletedAt: current.deletedAt || null,
+                lastSeenAt: current.lastSeenAt || null
+            };
+        }
+        return {
+            userId,
+            isArchived: false,
+            isDeleted: false,
+            archivedAt: null,
+            deletedAt: null,
+            lastSeenAt: null
+        };
+    });
+}
+
+function getParticipantMetaForUser(conversation, userId) {
+    const uid = Number(userId);
+    const meta = ensureParticipantMeta(conversation, conversation.participants || []);
+    return meta.find((row) => Number(row.userId) === uid) || {
+        userId: uid,
+        isArchived: false,
+        isDeleted: false,
+        archivedAt: null,
+        deletedAt: null,
+        lastSeenAt: null
+    };
+}
+
+function sanitizeConversationForViewer(row, viewerUserId) {
+    const viewerId = Number(viewerUserId);
+    const status = row.status || CONVERSATION_STATUS.ACTIVE;
+    const meta = getParticipantMetaForUser(row, viewerId);
+    const isEnded = status === CONVERSATION_STATUS.ENDED;
+
+    return {
+        id: row.id,
+        type: row.type,
+        participants: row.participants || [],
+        participantDisplayNames: toDisplayNamesMap(row.participantDisplayNames),
+        sourceType: row.sourceType || 'direct',
+        created_at: row.createdAt,
+        status,
+        endedAt: row.endedAt || null,
+        endReason: isEnded ? (row.endReason || END_REASONS.SILENT_EXIT) : null,
+        closingNoteId: isEnded ? (row.closingNoteId || null) : null,
+        closingNoteText: isEnded
+            ? (row.closingNoteText || DEFAULT_CLOSING_NOTE_TEXT)
+            : null,
+        isArchivedForMe: !!meta.isArchived,
+        isDeletedForMe: !!meta.isDeleted,
+        reconnectCount: Number(row.reconnectCount || 0),
+        reconnectAllowedAfter: row.reconnectAllowedAfter || null,
+        reconnectBlocked: !!row.reconnectBlocked,
+        canReconnect: canRequestReconnect(row)
+        // endedBy intentionally omitted — never exposed to clients
+    };
+}
+
+function canRequestReconnect(conversation) {
+    if (!conversation) return false;
+    if (conversation.status !== CONVERSATION_STATUS.ENDED) return false;
+    if (conversation.reconnectBlocked) return false;
+    if (conversation.endReason === END_REASONS.REPORT) return false;
+
+    const reconnectCount = Number(conversation.reconnectCount || 0);
+    const maxReconnects = Number.isFinite(MAX_RECONNECTS) && MAX_RECONNECTS >= 0
+        ? MAX_RECONNECTS
+        : 1;
+    if (reconnectCount >= maxReconnects) return false;
+
+    const allowedAfter = conversation.reconnectAllowedAfter
+        ? new Date(conversation.reconnectAllowedAfter).getTime()
+        : 0;
+    if (allowedAfter && Date.now() < allowedAfter) return false;
+
+    return true;
+}
+
+async function findActiveDmBetween(userA, userB) {
+    return Conversation.findOne({
+        type: 'dm',
+        participants: { $all: [userA, userB], $size: 2 },
+        status: CONVERSATION_STATUS.ACTIVE
+    })
+        .select({ id: 1, participantDisplayNames: 1, status: 1, _id: 0 })
+        .lean();
+}
+
+async function findLatestEndedDmBetween(userA, userB) {
+    return Conversation.findOne({
+        type: 'dm',
+        participants: { $all: [userA, userB], $size: 2 },
+        status: CONVERSATION_STATUS.ENDED
+    })
+        .sort({ endedAt: -1, id: -1 })
+        .select({
+            _id: 0,
+            id: 1,
+            status: 1,
+            endedAt: 1,
+            endReason: 1,
+            reconnectCount: 1,
+            reconnectAllowedAfter: 1,
+            reconnectBlocked: 1
+        })
+        .lean();
+}
+
+async function requireParticipantConversation(conversationId, userId, { includeEndedBy = false } = {}) {
+    const cid = Number(conversationId);
+    const uid = Number(userId);
+    if (!cid || !uid) {
+        throw createConversationError('CONVERSATION_INVALID', 'Invalid conversation.', 400);
+    }
+
+    const select = {
+        _id: 0,
+        id: 1,
+        type: 1,
+        participants: 1,
+        participantDisplayNames: 1,
+        participantMeta: 1,
+        sourceType: 1,
+        createdAt: 1,
+        status: 1,
+        endedAt: 1,
+        endReason: 1,
+        closingNoteId: 1,
+        closingNoteText: 1,
+        reconnectCount: 1,
+        reconnectAllowedAfter: 1,
+        reconnectBlocked: 1,
+        isArchived: 1,
+        deletedAt: 1
+    };
+    if (includeEndedBy) {
+        select.endedBy = 1;
+    }
+
+    const conversation = await Conversation.findOne({
+        id: cid,
+        participants: uid
+    })
+        .select(select)
+        .lean();
+
+    if (!conversation) {
+        throw createConversationError('CONVERSATION_NOT_FOUND', 'Conversation not found.', 404);
+    }
+
+    const meta = getParticipantMetaForUser(conversation, uid);
+    if (meta.isDeleted) {
+        throw createConversationError('CONVERSATION_DELETED', 'Conversation is no longer available.', 410);
+    }
+
+    return conversation;
+}
+
+function emitConversationLifecycle(eventName, payload) {
+    try {
+        emitter.emit(eventName, payload);
+    } catch (err) {
+        console.error(`Emitter error (${eventName}):`, err);
+    }
+}
+
 function sanitizeChatRequest(row, viewerUserId) {
     const viewerId = Number(viewerUserId);
     const isIncoming = Number(row.targetUserId) === viewerId;
@@ -84,10 +292,7 @@ exports.createDMConversation = async (userA, userB, options = {}) => {
 
     let existing = null;
     if (mightHaveDMConversation(userA, userB)) {
-        existing = await Conversation.findOne({
-            type: 'dm',
-            participants: { $all: [userA, userB], $size: 2 }
-        }).select({ id: 1, participantDisplayNames: 1, _id: 0 }).lean();
+        existing = await findActiveDmBetween(userA, userB);
     }
 
     const normalizedDisplayNames = toDisplayNamesMap(options.displayNames);
@@ -112,27 +317,59 @@ exports.createDMConversation = async (userA, userB, options = {}) => {
         type: 'dm',
         participants: [userA, userB],
         participantDisplayNames: normalizedDisplayNames,
-        sourceType: options.sourceType === 'chat_request' ? 'chat_request' : 'direct'
+        participantMeta: buildDefaultParticipantMeta([userA, userB]),
+        sourceType: options.sourceType === 'chat_request' ? 'chat_request' : 'direct',
+        status: CONVERSATION_STATUS.ACTIVE
     });
     rememberDMConversation(userA, userB);
 
     return { conversationId };
 };
 
-exports.getUserConversations = async (userId) => {
-    const rows = await Conversation.find({ participants: userId })
+exports.getUserConversations = async (userId, options = {}) => {
+    const uid = Number(userId);
+    const view = String(options.view || 'active').toLowerCase();
+
+    const rows = await Conversation.find({ participants: uid })
         .sort({ id: -1 })
-        .select({ _id: 0, id: 1, type: 1, participants: 1, participantDisplayNames: 1, sourceType: 1, createdAt: 1 })
+        .select({
+            _id: 0,
+            id: 1,
+            type: 1,
+            participants: 1,
+            participantDisplayNames: 1,
+            participantMeta: 1,
+            sourceType: 1,
+            createdAt: 1,
+            status: 1,
+            endedAt: 1,
+            endReason: 1,
+            closingNoteId: 1,
+            closingNoteText: 1,
+            reconnectCount: 1,
+            reconnectAllowedAfter: 1,
+            reconnectBlocked: 1
+        })
         .lean();
 
-    return rows.map((row) => ({
-        id: row.id,
-        type: row.type,
-        participants: row.participants || [],
-        participantDisplayNames: toDisplayNamesMap(row.participantDisplayNames),
-        sourceType: row.sourceType || 'direct',
-        created_at: row.createdAt
-    }));
+    const sanitized = rows
+        .map((row) => sanitizeConversationForViewer(row, uid))
+        .filter((row) => !row.isDeletedForMe);
+
+    if (view === 'all') {
+        return sanitized;
+    }
+
+    if (view === 'archived') {
+        return sanitized.filter((row) => row.isArchivedForMe);
+    }
+
+    if (view === 'past') {
+        return sanitized.filter((row) => row.status === CONVERSATION_STATUS.ENDED && !row.isArchivedForMe);
+    }
+
+    // Active inbox: active conversations not archived or deleted by viewer
+    return sanitized.filter((row) => !row.isArchivedForMe && row.status !== CONVERSATION_STATUS.ENDED);
 };
 
 exports.getReadState = async (conversationId) => {
@@ -149,8 +386,37 @@ exports.getReadState = async (conversationId) => {
 exports.getUnreadCounts = async (userId) => {
     const now = new Date();
     const rows = await Conversation.aggregate([
-        { $match: { participants: userId } },
-        { $project: { _id: 0, id: 1 } },
+        {
+            $match: {
+                participants: userId,
+                status: CONVERSATION_STATUS.ACTIVE
+            }
+        },
+        { $project: { _id: 0, id: 1, participantMeta: 1 } },
+        {
+            $addFields: {
+                viewerMeta: {
+                    $first: {
+                        $filter: {
+                            input: { $ifNull: ['$participantMeta', []] },
+                            as: 'meta',
+                            cond: { $eq: ['$$meta.userId', userId] }
+                        }
+                    }
+                }
+            }
+        },
+        {
+            $match: {
+                $or: [
+                    { viewerMeta: { $eq: null } },
+                    {
+                        'viewerMeta.isArchived': { $ne: true },
+                        'viewerMeta.isDeleted': { $ne: true }
+                    }
+                ]
+            }
+        },
         {
             $lookup: {
                 from: ConversationRead.collection.name,
@@ -214,10 +480,7 @@ exports.getUnreadCounts = async (userId) => {
 exports.getOrCreateDM = async (userId, targetUserId, options = {}) => {
     let existing = null;
     if (mightHaveDMConversation(userId, targetUserId)) {
-        existing = await Conversation.findOne({
-            type: 'dm',
-            participants: { $all: [userId, targetUserId], $size: 2 }
-        }).select({ id: 1, participantDisplayNames: 1, _id: 0 }).lean();
+        existing = await findActiveDmBetween(userId, targetUserId);
     }
 
     const normalizedDisplayNames = toDisplayNamesMap(options.displayNames);
@@ -236,21 +499,47 @@ exports.getOrCreateDM = async (userId, targetUserId, options = {}) => {
         return { conversationId: existing.id, created: false };
     }
 
+    // Reconnect path: only create a fresh conversation when Silent Exit rules allow it
+    if (options.fromReconnect) {
+        const ended = await findLatestEndedDmBetween(userId, targetUserId);
+        if (ended && !canRequestReconnect(ended)) {
+            throw createConversationError(
+                'CONNECTION_RECONNECT_DENIED',
+                'A new connection cannot be requested for this conversation yet.',
+                409
+            );
+        }
+    }
+
     const conversationId = await getNextSequence('conversations');
     await Conversation.create({
         id: conversationId,
         type: 'dm',
         participants: [userId, targetUserId],
         participantDisplayNames: normalizedDisplayNames,
-        sourceType: options.sourceType === 'chat_request' ? 'chat_request' : 'direct'
+        participantMeta: buildDefaultParticipantMeta([userId, targetUserId]),
+        sourceType: options.sourceType === 'chat_request' ? 'chat_request' : 'direct',
+        status: CONVERSATION_STATUS.ACTIVE,
+        reconnectCount: options.fromReconnect
+            ? Number((options.priorReconnectCount || 0)) + 1
+            : 0
     });
+
+    if (options.fromReconnect && options.priorConversationId) {
+        await Conversation.updateOne(
+            { id: Number(options.priorConversationId) },
+            {
+                $inc: { reconnectCount: 1 },
+                $set: { reconnectAllowedAfter: null }
+            }
+        );
+    }
+
     rememberDMConversation(userId, targetUserId);
 
-    // Emit service-level event for new DM creation
     try {
         emitter.emit('dm_created', { conversationId, participants: [userId, targetUserId] });
     } catch (e) {
-        // non-fatal
         console.error('Emitter error (dm_created):', e);
     }
 
@@ -279,10 +568,7 @@ exports.createChatRequest = async ({
 
     let existingConversation = null;
     if (mightHaveDMConversation(requesterId, targetId)) {
-        existingConversation = await Conversation.findOne({
-            type: 'dm',
-            participants: { $all: [requesterId, targetId], $size: 2 }
-        }).select({ id: 1, _id: 0 }).lean();
+        existingConversation = await findActiveDmBetween(requesterId, targetId);
     }
 
     if (existingConversation) {
@@ -294,6 +580,18 @@ exports.createChatRequest = async ({
             conversationId: existingConversation.id,
             targetAlias: String(targetAlias || '').trim() || 'this user'
         };
+    }
+
+    // Silent Exit reconnect: only allow a new request when cooldown + max reconnects pass
+    const endedConversation = await findLatestEndedDmBetween(requesterId, targetId);
+    if (endedConversation && !canRequestReconnect(endedConversation)) {
+        throw createConversationError(
+            'CONNECTION_RECONNECT_DENIED',
+            endedConversation.endReason === END_REASONS.REPORT
+                ? 'This connection cannot be restarted.'
+                : 'You can request a new connection after the cooldown period.',
+            409
+        );
     }
 
     let existingRequest = null;
@@ -456,6 +754,19 @@ exports.respondToChatRequest = async ({ userId, requestId, action }) => {
     let conversationId = null;
 
     if (normalizedAction === 'accept') {
+        const endedConversation = await findLatestEndedDmBetween(
+            Number(request.requesterUserId),
+            Number(request.targetUserId)
+        );
+        const isReconnect = Boolean(endedConversation);
+        if (isReconnect && !canRequestReconnect(endedConversation)) {
+            throw createConversationError(
+                'CONNECTION_RECONNECT_DENIED',
+                'A new connection cannot be started for this conversation.',
+                409
+            );
+        }
+
         const result = await exports.getOrCreateDM(
             Number(request.requesterUserId),
             Number(request.targetUserId),
@@ -464,7 +775,10 @@ exports.respondToChatRequest = async ({ userId, requestId, action }) => {
                 displayNames: {
                     [request.requesterUserId]: request.requesterAlias,
                     [request.targetUserId]: request.targetAlias
-                }
+                },
+                fromReconnect: isReconnect,
+                priorConversationId: isReconnect ? endedConversation.id : null,
+                priorReconnectCount: isReconnect ? Number(endedConversation.reconnectCount || 0) : 0
             }
         );
         conversationId = Number(result && result.conversationId) || null;
@@ -501,3 +815,288 @@ exports.respondToChatRequest = async ({ userId, requestId, action }) => {
 
     return sanitizeChatRequest(updated, uid);
 };
+
+exports.getConversationById = async (userId, conversationId) => {
+    const conversation = await requireParticipantConversation(conversationId, userId);
+    return sanitizeConversationForViewer(conversation, userId);
+};
+
+exports.getClosingNotesCatalog = () => ({
+    notes: CLOSING_NOTES.map((note) => ({ ...note })),
+    defaultText: DEFAULT_CLOSING_NOTE_TEXT
+});
+
+/**
+ * Silent Exit — end a connection without revealing who initiated it.
+ * endedBy is persisted for moderation only and never returned to clients.
+ */
+exports.endConnection = async ({ userId, conversationId, closingNoteId = null, endReason = END_REASONS.SILENT_EXIT }) => {
+    const uid = Number(userId);
+    const conversation = await requireParticipantConversation(conversationId, uid);
+
+    if (conversation.status === CONVERSATION_STATUS.ENDED) {
+        return sanitizeConversationForViewer(conversation, uid);
+    }
+
+    const reason = endReason === END_REASONS.REPORT
+        ? END_REASONS.REPORT
+        : END_REASONS.SILENT_EXIT;
+
+    const note = reason === END_REASONS.REPORT
+        ? {
+            closingNoteId: null,
+            closingNoteText: DEFAULT_CLOSING_NOTE_TEXT,
+            closingNoteEmoji: null
+        }
+        : resolveClosingNote(closingNoteId);
+
+    const now = new Date();
+    const reconnectBlocked = reason === END_REASONS.REPORT;
+    const reconnectAllowedAfter = reconnectBlocked
+        ? null
+        : new Date(now.getTime() + getReconnectCooldownMs());
+
+    const participantMeta = ensureParticipantMeta(conversation, conversation.participants);
+
+    await Conversation.updateOne(
+        { id: conversation.id, status: { $ne: CONVERSATION_STATUS.ENDED } },
+        {
+            $set: {
+                status: CONVERSATION_STATUS.ENDED,
+                endedAt: now,
+                endedBy: uid,
+                endReason: reason,
+                closingNoteId: note.closingNoteId,
+                closingNoteText: note.closingNoteText,
+                reconnectAllowedAfter,
+                reconnectBlocked,
+                participantMeta,
+                // Keep legacy send guards in sync
+                isArchived: true
+            }
+        }
+    );
+
+    const updated = await Conversation.findOne({ id: conversation.id })
+        .select({
+            _id: 0,
+            id: 1,
+            type: 1,
+            participants: 1,
+            participantDisplayNames: 1,
+            participantMeta: 1,
+            sourceType: 1,
+            createdAt: 1,
+            status: 1,
+            endedAt: 1,
+            endReason: 1,
+            closingNoteId: 1,
+            closingNoteText: 1,
+            reconnectCount: 1,
+            reconnectAllowedAfter: 1,
+            reconnectBlocked: 1
+        })
+        .lean();
+
+    const publicPayload = {
+        conversationId: updated.id,
+        status: CONVERSATION_STATUS.ENDED,
+        endedAt: updated.endedAt,
+        endReason: updated.endReason,
+        closingNoteId: updated.closingNoteId,
+        closingNoteText: updated.closingNoteText || DEFAULT_CLOSING_NOTE_TEXT,
+        participants: updated.participants || []
+        // No endedBy — anonymity guarantee
+    };
+
+    emitConversationLifecycle('conversation_ended', publicPayload);
+
+    return sanitizeConversationForViewer(updated, uid);
+};
+
+exports.pauseConnection = async ({ userId, conversationId }) => {
+    const uid = Number(userId);
+    const conversation = await requireParticipantConversation(conversationId, uid);
+
+    if (conversation.status === CONVERSATION_STATUS.ENDED) {
+        throw createConversationError(
+            'CONNECTION_ALREADY_ENDED',
+            'This conversation has already ended.',
+            409
+        );
+    }
+
+    if (conversation.status === CONVERSATION_STATUS.PAUSED) {
+        return sanitizeConversationForViewer(conversation, uid);
+    }
+
+    await Conversation.updateOne(
+        { id: conversation.id },
+        { $set: { status: CONVERSATION_STATUS.PAUSED } }
+    );
+
+    const updated = await requireParticipantConversation(conversation.id, uid);
+    emitConversationLifecycle('conversation_paused', {
+        conversationId: updated.id,
+        status: CONVERSATION_STATUS.PAUSED,
+        participants: updated.participants || []
+    });
+
+    return sanitizeConversationForViewer(updated, uid);
+};
+
+exports.resumeConnection = async ({ userId, conversationId }) => {
+    const uid = Number(userId);
+    const conversation = await requireParticipantConversation(conversationId, uid);
+
+    if (conversation.status === CONVERSATION_STATUS.ENDED) {
+        throw createConversationError(
+            'CONNECTION_ALREADY_ENDED',
+            'This conversation has already ended.',
+            409
+        );
+    }
+
+    if (conversation.status === CONVERSATION_STATUS.ACTIVE) {
+        return sanitizeConversationForViewer(conversation, uid);
+    }
+
+    await Conversation.updateOne(
+        { id: conversation.id, status: CONVERSATION_STATUS.PAUSED },
+        { $set: { status: CONVERSATION_STATUS.ACTIVE } }
+    );
+
+    const updated = await requireParticipantConversation(conversation.id, uid);
+    emitConversationLifecycle('conversation_resumed', {
+        conversationId: updated.id,
+        status: CONVERSATION_STATUS.ACTIVE,
+        participants: updated.participants || []
+    });
+
+    return sanitizeConversationForViewer(updated, uid);
+};
+
+exports.archiveConnectionForUser = async ({ userId, conversationId }) => {
+    const uid = Number(userId);
+    const conversation = await requireParticipantConversation(conversationId, uid);
+    const now = new Date();
+    const participantMeta = ensureParticipantMeta(conversation, conversation.participants)
+        .map((row) => (
+            Number(row.userId) === uid
+                ? { ...row, isArchived: true, archivedAt: now }
+                : row
+        ));
+
+    await Conversation.updateOne(
+        { id: conversation.id },
+        { $set: { participantMeta } }
+    );
+
+    const updated = await requireParticipantConversation(conversation.id, uid);
+    return sanitizeConversationForViewer(updated, uid);
+};
+
+exports.unarchiveConnectionForUser = async ({ userId, conversationId }) => {
+    const uid = Number(userId);
+    const conversation = await requireParticipantConversation(conversationId, uid);
+    const participantMeta = ensureParticipantMeta(conversation, conversation.participants)
+        .map((row) => (
+            Number(row.userId) === uid
+                ? { ...row, isArchived: false, archivedAt: null }
+                : row
+        ));
+
+    await Conversation.updateOne(
+        { id: conversation.id },
+        { $set: { participantMeta } }
+    );
+
+    const updated = await requireParticipantConversation(conversation.id, uid);
+    return sanitizeConversationForViewer(updated, uid);
+};
+
+exports.deleteConnectionForUser = async ({ userId, conversationId }) => {
+    const uid = Number(userId);
+    const conversation = await requireParticipantConversation(conversationId, uid);
+    const now = new Date();
+    const participantMeta = ensureParticipantMeta(conversation, conversation.participants)
+        .map((row) => (
+            Number(row.userId) === uid
+                ? { ...row, isDeleted: true, deletedAt: now, isArchived: true, archivedAt: row.archivedAt || now }
+                : row
+        ));
+
+    await Conversation.updateOne(
+        { id: conversation.id },
+        { $set: { participantMeta } }
+    );
+
+    emitConversationLifecycle('conversation_deleted_for_user', {
+        conversationId: conversation.id,
+        userId: uid
+    });
+
+    return { conversationId: conversation.id, deleted: true };
+};
+
+/**
+ * Report → immediately Silent Exit with reconnect permanently blocked.
+ */
+exports.reportAndEndConnection = async ({ userId, conversationId, reason = '' }) => {
+    const uid = Number(userId);
+    await requireParticipantConversation(conversationId, uid);
+
+    const result = await exports.endConnection({
+        userId: uid,
+        conversationId,
+        closingNoteId: null,
+        endReason: END_REASONS.REPORT
+    });
+
+    emitConversationLifecycle('conversation_reported', {
+        conversationId: Number(conversationId),
+        reporterUserId: uid,
+        reason: String(reason || '').trim().slice(0, 500),
+        participants: result.participants || []
+    });
+
+    return result;
+};
+
+/**
+ * Shared guard used by REST + socket message paths.
+ */
+exports.assertConversationAcceptsMessages = (conversation) => {
+    if (!conversation) {
+        throw createConversationError('CONVERSATION_NOT_FOUND', 'Conversation not found.', 404);
+    }
+
+    const status = conversation.status || CONVERSATION_STATUS.ACTIVE;
+
+    if (status === CONVERSATION_STATUS.ENDED) {
+        throw createConversationError(
+            'CONVERSATION_CLOSED',
+            'This conversation has come to an end.',
+            409
+        );
+    }
+
+    if (status === CONVERSATION_STATUS.PAUSED) {
+        throw createConversationError(
+            'CONVERSATION_PAUSED',
+            'This conversation is paused.',
+            409
+        );
+    }
+
+    if (conversation.deletedAt) {
+        throw createConversationError(
+            'CONVERSATION_DELETED',
+            'Conversation is no longer available.',
+            410
+        );
+    }
+
+    return true;
+};
+
