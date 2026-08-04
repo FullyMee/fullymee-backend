@@ -85,7 +85,7 @@ const os = require('os');
 
 // Metrics and batching
 const METRICS_DIR = 'metrics';
-try { fs.mkdirSync(METRICS_DIR, { recursive: true }); } catch (e) {}
+try { fs.mkdirSync(METRICS_DIR, { recursive: true }); } catch (e) { }
 
 const PERSIST_LATENCY_CSV = `${METRICS_DIR}/persist_latency.csv`;
 const RESOURCE_LOG_CSV = `${METRICS_DIR}/resource_log.csv`;
@@ -166,11 +166,11 @@ async function startPersistWorker() {
                                 if (enqueued) {
                                     const latency = now - enqueued;
                                     PERSIST_METRICS.push({ timestamp: now, messageId: id, latency });
-                                    try { fs.appendFile(PERSIST_LATENCY_CSV, `${now},${id},${latency}\n`, () => {}); } catch (e) {}
+                                    try { fs.appendFile(PERSIST_LATENCY_CSV, `${now},${id},${latency}\n`, () => { }); } catch (e) { }
                                     ENQUEUE_MAP.delete(id);
-                                    try { metrics.recordPersist(latency); } catch (e) {}
+                                    try { metrics.recordPersist(latency); } catch (e) { }
                                 }
-                            } catch (e) {}
+                            } catch (e) { }
                         }
                     }
                 } catch (e) {
@@ -198,8 +198,8 @@ async function startPersistWorker() {
             try {
                 persistWorkerAlive = false;
                 metrics.setWorkerUp(0);
-                try { persistWorker.kill('SIGTERM'); } catch (e) {}
-            } catch (e) {}
+                try { persistWorker.kill('SIGTERM'); } catch (e) { }
+            } catch (e) { }
         }
     }, 3000);
 }
@@ -215,9 +215,9 @@ function enqueuePersistMessage(msg) {
         return false;
     }
     MESSAGE_BATCH.buffer.push(msg);
-    try { metrics.recordEnqueue(); } catch (e) {}
-    try { ENQUEUE_MAP.set(msg.id, Date.now()); } catch (e) {}
-    try { metrics.setQueueLength(MESSAGE_BATCH.buffer.length); } catch (e) {}
+    try { metrics.recordEnqueue(); } catch (e) { }
+    try { ENQUEUE_MAP.set(msg.id, Date.now()); } catch (e) { }
+    try { metrics.setQueueLength(MESSAGE_BATCH.buffer.length); } catch (e) { }
     if (MESSAGE_BATCH.buffer.length >= MESSAGE_BATCH.batchSize) {
         flushPersistBatch().catch((err) => console.error('Batch flush error:', err));
     }
@@ -235,7 +235,7 @@ async function flushPersistBatch() {
             const ids = batch.map((b) => b && b.id).filter(Boolean);
             const enqueueTimes = {};
             for (const id of ids) {
-                try { enqueueTimes[id] = ENQUEUE_MAP.get(id) || Date.now(); } catch (e) {}
+                try { enqueueTimes[id] = ENQUEUE_MAP.get(id) || Date.now(); } catch (e) { }
             }
             try {
                 persistWorker.send({ type: 'batch', batch, enqueueTimes });
@@ -252,9 +252,9 @@ async function flushPersistBatch() {
                     if (enqueued) {
                         const latency = foundIds.has(id) ? now - enqueued : -1;
                         PERSIST_METRICS.push({ timestamp: now, messageId: id, latency });
-                        try { fs.appendFile(PERSIST_LATENCY_CSV, `${now},${id},${latency}\n`, () => {}); } catch (e) {}
+                        try { fs.appendFile(PERSIST_LATENCY_CSV, `${now},${id},${latency}\n`, () => { }); } catch (e) { }
                         ENQUEUE_MAP.delete(id);
-                        try { metrics.recordPersist(latency); } catch (e) {}
+                        try { metrics.recordPersist(latency); } catch (e) { }
                     }
                 }
             }
@@ -272,7 +272,7 @@ async function flushPersistBatch() {
                 try {
                     RECONCILE_MAP.set(doc.clientMessageId, doc);
                     RECONCILE_SET.add(doc.clientMessageId);
-                } catch (e) {}
+                } catch (e) { }
             }
 
             // compute persist latencies for items inserted
@@ -287,9 +287,9 @@ async function flushPersistBatch() {
                         if (enqueued) {
                             const latency = foundIds.has(id) ? now - enqueued : -1;
                             PERSIST_METRICS.push({ timestamp: now, messageId: id, latency });
-                            try { fs.appendFile(PERSIST_LATENCY_CSV, `${now},${id},${latency}\n`, () => {}); } catch (e) {}
+                            try { fs.appendFile(PERSIST_LATENCY_CSV, `${now},${id},${latency}\n`, () => { }); } catch (e) { }
                             ENQUEUE_MAP.delete(id);
-                            try { metrics.recordPersist(latency); } catch (e) {}
+                            try { metrics.recordPersist(latency); } catch (e) { }
                         }
                     }
                 }
@@ -330,7 +330,7 @@ setInterval(async () => {
                     await Message.bulkWrite(bulkOps, { ordered: false });
                 } catch (e) {
                     console.error('Background reconcile bulkWrite error:', e && e.message ? e.message : e);
-                    try { metrics.recordReconcileFailure(); } catch (e2) {}
+                    try { metrics.recordReconcileFailure(); } catch (e2) { }
                 }
             }
         }
@@ -358,10 +358,10 @@ setInterval(() => {
         const cpuUser = Math.round((userDiff / 1000) / dt); // ms per ms -> approx %
         const cpuSystem = Math.round((systemDiff / 1000) / dt);
         const cpus = os.cpus().length;
-        fs.appendFile(RESOURCE_LOG_CSV, `${now},${mu.rss},${mu.heapUsed},${mu.heapTotal},${mu.external},${cpuUser},${cpuSystem},${cpus}\n`, () => {});
+        fs.appendFile(RESOURCE_LOG_CSV, `${now},${mu.rss},${mu.heapUsed},${mu.heapTotal},${mu.external},${cpuUser},${cpuSystem},${cpus}\n`, () => { });
         lastCpu = cpu;
         lastTime = now;
-    } catch (e) {}
+    } catch (e) { }
 }, 1000);
 
 function getOnlineUserIdsExcept(userId) {
@@ -438,8 +438,12 @@ try {
     // Health and readiness probes
     const READINESS_MAX_QUEUE = Number(process.env.READINESS_MAX_QUEUE || 5000);
 
-    expressApp.get('/health', (req, res) => {
-        return res.status(200).json({ status: 'ok' });
+    expressApp.get(['/health', '/api/health'], (req, res) => {
+        return res.status(200).json({
+            status: 'ok',
+            uptime: process.uptime(),
+            timestamp: new Date().toISOString()
+        });
     });
 
     expressApp.get('/ready', (req, res) => {
@@ -707,7 +711,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('send_message', async (data, callback) => {
-        const safeCallback = typeof callback === 'function' ? callback : () => {};
+        const safeCallback = typeof callback === 'function' ? callback : () => { };
 
         try {
             if (isRateLimited(userId)) {
@@ -799,41 +803,41 @@ io.on('connection', (socket) => {
 
                 return safeCallback({ status: 'delivered', messageId, clientMessageId });
             } catch (err) {
-                    if (err && err.code === 11000) {
-                        try {
-                            console.error('Duplicate key error inserting message', {
-                                code: err.code,
-                                keyPattern: err.keyPattern,
-                                keyValue: err.keyValue,
-                                message: String(err.message || '')
-                            });
-                        } catch (logErr) {}
-                    }
-
-                    // If duplicate is due to clientMessageId, return the existing message id (idempotent retry)
-                    if (err && err.code === 11000 && String(err.message || '').includes('clientMessageId')) {
-                        try {
-                            const existing = await Message.findOne({ clientMessageId }).select({ id: 1 }).lean();
-                            if (existing && existing.id) {
-                                return safeCallback({
-                                    status: 'delivered',
-                                    messageId: existing.id,
-                                    clientMessageId
-                                });
-                            }
-                        } catch (lookupErr) {
-                            console.error('Error looking up existing message after duplicate key', lookupErr);
-                        }
-
-                        // fallback: inform client the duplicate was ignored
-                        return safeCallback({
-                            status: 'duplicate_ignored',
-                            clientMessageId
+                if (err && err.code === 11000) {
+                    try {
+                        console.error('Duplicate key error inserting message', {
+                            code: err.code,
+                            keyPattern: err.keyPattern,
+                            keyValue: err.keyValue,
+                            message: String(err.message || '')
                         });
+                    } catch (logErr) { }
+                }
+
+                // If duplicate is due to clientMessageId, return the existing message id (idempotent retry)
+                if (err && err.code === 11000 && String(err.message || '').includes('clientMessageId')) {
+                    try {
+                        const existing = await Message.findOne({ clientMessageId }).select({ id: 1 }).lean();
+                        if (existing && existing.id) {
+                            return safeCallback({
+                                status: 'delivered',
+                                messageId: existing.id,
+                                clientMessageId
+                            });
+                        }
+                    } catch (lookupErr) {
+                        console.error('Error looking up existing message after duplicate key', lookupErr);
                     }
 
-                    throw err;
+                    // fallback: inform client the duplicate was ignored
+                    return safeCallback({
+                        status: 'duplicate_ignored',
+                        clientMessageId
+                    });
                 }
+
+                throw err;
+            }
         } catch (err) {
             console.error('Message reliability error:', err);
             return safeCallback({ status: 'failed' });
@@ -1059,8 +1063,54 @@ startServer().catch((err) => {
     process.exit(1);
 });
 
+// ── Self-Ping Keep-Alive (Render free-tier) ────────────────────────────────
+// Pings /health every 4 minutes so Render never marks the service as inactive
+// (free tier spins down after 15 min of no inbound requests).
+// Set SELF_PING_ENABLED=false in your environment to disable.
+(function startSelfPing() {
+    if (String(process.env.SELF_PING_ENABLED || 'true').toLowerCase() === 'false') return;
+
+    const SELF_PING_INTERVAL_MS = Number(process.env.SELF_PING_INTERVAL_MS || 4 * 60 * 1000); // default 4 min
+    const RENDER_URL = process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_URL || '';
+
+    if (!RENDER_URL) {
+        // No public URL configured — self-ping disabled (only runs meaningfully on cloud)
+        return;
+    }
+
+    const pingUrl = RENDER_URL.replace(/\/$/, '') + '/health';
+
+    function doPing() {
+        try {
+            const mod = pingUrl.startsWith('https') ? require('https') : require('http');
+            const req = mod.get(pingUrl, { timeout: 10000 }, (res) => {
+                // Consume response body so the socket is released
+                res.resume();
+                console.log(`[KeepAlive] Pinged ${pingUrl} → ${res.statusCode}`);
+            });
+            req.on('error', (err) => {
+                console.warn(`[KeepAlive] Ping failed: ${err.message}`);
+            });
+            req.setTimeout(10000, () => {
+                req.destroy();
+            });
+        } catch (e) {
+            console.warn('[KeepAlive] Self-ping error:', e && e.message ? e.message : e);
+        }
+    }
+
+    // Delay first ping by 30s so the server is fully up
+    setTimeout(() => {
+        doPing();
+        setInterval(doPing, SELF_PING_INTERVAL_MS);
+    }, 30 * 1000);
+
+    console.log(`[KeepAlive] Self-ping enabled → ${pingUrl} every ${SELF_PING_INTERVAL_MS / 1000}s`);
+})();
+
+
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // expose server for cluster-run to inject connections
-try { module.exports.server = server; } catch (e) {}
+try { module.exports.server = server; } catch (e) { }
