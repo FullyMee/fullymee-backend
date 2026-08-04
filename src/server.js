@@ -395,13 +395,32 @@ async function getAccessibleConversation(conversationId, userId) {
     if (!parsedConversationId || Number.isNaN(parsedConversationId)) return null;
     if (!parsedUserId || Number.isNaN(parsedUserId)) return null;
 
-    return Conversation.findOne({
+    const conversation = await Conversation.findOne({
         id: parsedConversationId,
         participants: parsedUserId,
         deletedAt: null
     })
-        .select({ _id: 0, id: 1, participants: 1, isArchived: 1, deletedAt: 1 })
+        .select({
+            _id: 0,
+            id: 1,
+            participants: 1,
+            status: 1,
+            isArchived: 1,
+            deletedAt: 1,
+            participantMeta: 1,
+            closingNoteText: 1,
+            endedAt: 1
+        })
         .lean();
+
+    if (!conversation) return null;
+
+    const meta = Array.isArray(conversation.participantMeta)
+        ? conversation.participantMeta.find((row) => Number(row.userId) === parsedUserId)
+        : null;
+    if (meta && meta.isDeleted) return null;
+
+    return conversation;
 }
 
 const io = new Server(server, {
@@ -517,6 +536,59 @@ try {
             }
         } catch (err) {
             console.error('Error handling chat_request_updated emitter:', err);
+        }
+    });
+
+    const emitToParticipants = (participantIds, eventName, payload) => {
+        for (const participantId of participantIds || []) {
+            const sockets = onlineUsersMap.get(Number(participantId));
+            if (!sockets) continue;
+            for (const sid of sockets) {
+                try {
+                    ioInst.to(sid).emit(eventName, payload);
+                } catch (emitErr) {
+                    console.error(`${eventName} emit error:`, emitErr);
+                }
+            }
+        }
+    };
+
+    convService.emitter.on('conversation_ended', (payload) => {
+        try {
+            const publicPayload = {
+                conversationId: payload.conversationId,
+                status: payload.status,
+                endedAt: payload.endedAt,
+                endReason: payload.endReason,
+                closingNoteId: payload.closingNoteId,
+                closingNoteText: payload.closingNoteText
+            };
+            emitToParticipants(payload.participants, 'conversation_ended', publicPayload);
+            ioInst.to(`conversation_${payload.conversationId}`).emit('conversation_ended', publicPayload);
+        } catch (err) {
+            console.error('Error handling conversation_ended emitter:', err);
+        }
+    });
+
+    convService.emitter.on('conversation_paused', (payload) => {
+        try {
+            emitToParticipants(payload.participants, 'conversation_paused', {
+                conversationId: payload.conversationId,
+                status: payload.status
+            });
+        } catch (err) {
+            console.error('Error handling conversation_paused emitter:', err);
+        }
+    });
+
+    convService.emitter.on('conversation_resumed', (payload) => {
+        try {
+            emitToParticipants(payload.participants, 'conversation_resumed', {
+                conversationId: payload.conversationId,
+                status: payload.status
+            });
+        } catch (err) {
+            console.error('Error handling conversation_resumed emitter:', err);
         }
     });
 } catch (err) {
@@ -650,7 +722,7 @@ io.on('connection', (socket) => {
             const expiresAt = getMessageExpiresAt();
 
             const conversation = await Conversation.findOne({ id: conversationId })
-                .select({ _id: 0, participants: 1, isArchived: 1, deletedAt: 1 })
+                .select({ _id: 0, participants: 1, status: 1, isArchived: 1, deletedAt: 1, participantMeta: 1 })
                 .lean();
             if (!conversation) {
                 return safeCallback({ status: 'error', message: 'Invalid conversation ID' });
@@ -663,8 +735,21 @@ io.on('connection', (socket) => {
                 return safeCallback({ status: 'error', message: 'Not a participant' });
             }
 
-            if (conversation.isArchived) {
-                return safeCallback({ status: 'error', message: 'Conversation archived' });
+            const status = conversation.status || 'ACTIVE';
+            if (status === 'ENDED') {
+                return safeCallback({
+                    status: 'conversation_closed',
+                    code: 'CONVERSATION_CLOSED',
+                    message: 'This conversation has come to an end.'
+                });
+            }
+
+            if (status === 'PAUSED') {
+                return safeCallback({
+                    status: 'conversation_paused',
+                    code: 'CONVERSATION_PAUSED',
+                    message: 'This conversation is paused.'
+                });
             }
 
             if (conversation.deletedAt) {
@@ -764,7 +849,7 @@ io.on('connection', (socket) => {
 
             const { conversationId, messageId } = parsed.data;
             const conversation = await getAccessibleConversation(conversationId, userId);
-            if (!conversation || conversation.isArchived) return;
+            if (!conversation || conversation.status === 'ENDED' || conversation.status === 'PAUSED') return;
 
             await ConversationRead.findOneAndUpdate(
                 { conversationId, userId },
@@ -793,7 +878,7 @@ io.on('connection', (socket) => {
         const { conversationId } = parsed.data;
         getAccessibleConversation(conversationId, userId)
             .then((conversation) => {
-                if (!conversation || conversation.isArchived) return;
+                if (!conversation || conversation.status === 'ENDED' || conversation.status === 'PAUSED') return;
                 socket.to(`conversation_${conversationId}`).emit('user_typing', { userId });
             })
             .catch((err) => {
@@ -810,7 +895,7 @@ io.on('connection', (socket) => {
         const { conversationId } = parsed.data;
         getAccessibleConversation(conversationId, userId)
             .then((conversation) => {
-                if (!conversation || conversation.isArchived) return;
+                if (!conversation || conversation.status === 'ENDED' || conversation.status === 'PAUSED') return;
                 socket.to(`conversation_${conversationId}`).emit('user_stop_typing', { userId });
             })
             .catch((err) => {
