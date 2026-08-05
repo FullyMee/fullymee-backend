@@ -175,6 +175,7 @@ router.get('/:identifier/profile', authenticate, async (req, res) => {
                 isSelf: true,
                 userId: currentUserId,
                 username: currentUser?.username || identifier,
+                avatar: currentUser?.preferences?.avatar || '🌊',
                 createdAt: currentUser?.createdAt
             });
         }
@@ -270,6 +271,7 @@ router.get('/:identifier/profile', authenticate, async (req, res) => {
             conversationId,
             userId: targetUserId,
             username: targetUser ? targetUser.username : identifier,
+            avatar: targetUser ? (targetUser.preferences?.avatar || '🌊') : '🌊',
             createdAt: targetUser ? targetUser.createdAt : null,
             stats: {
                 confessions: confessionsCount,
