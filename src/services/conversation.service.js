@@ -123,6 +123,25 @@ function getParticipantMetaForUser(conversation, userId) {
     };
 }
 
+async function attachParticipantAvatars(conversations) {
+    if (!conversations || !conversations.length) return conversations;
+    const participantIds = [...new Set(conversations.flatMap(c => c.participants || []))];
+    if (!participantIds.length) return conversations;
+
+    const users = await User.find({ id: { $in: participantIds } }).select({ id: 1, 'preferences.avatar': 1 }).lean();
+    const avatarMap = new Map(users.map(u => [u.id, u.preferences?.avatar || '🌊']));
+
+    for (const c of conversations) {
+        if (!c.participantAvatars) {
+            c.participantAvatars = {};
+        }
+        for (const pid of c.participants || []) {
+            c.participantAvatars[pid] = avatarMap.get(pid) || '🌊';
+        }
+    }
+    return conversations;
+}
+
 function sanitizeConversationForViewer(row, viewerUserId) {
     const viewerId = Number(viewerUserId);
     const status = row.status || CONVERSATION_STATUS.ACTIVE;
@@ -134,6 +153,7 @@ function sanitizeConversationForViewer(row, viewerUserId) {
         type: row.type,
         participants: row.participants || [],
         participantDisplayNames: toDisplayNamesMap(row.participantDisplayNames),
+        participantAvatars: row.participantAvatars || {},
         sourceType: row.sourceType || 'direct',
         created_at: row.createdAt,
         status,
@@ -351,6 +371,8 @@ exports.getUserConversations = async (userId, options = {}) => {
             reconnectBlocked: 1
         })
         .lean();
+
+    await attachParticipantAvatars(rows);
 
     const sanitized = rows
         .map((row) => sanitizeConversationForViewer(row, uid))
@@ -818,6 +840,7 @@ exports.respondToChatRequest = async ({ userId, requestId, action }) => {
 
 exports.getConversationById = async (userId, conversationId) => {
     const conversation = await requireParticipantConversation(conversationId, userId);
+    await attachParticipantAvatars([conversation]);
     return sanitizeConversationForViewer(conversation, userId);
 };
 

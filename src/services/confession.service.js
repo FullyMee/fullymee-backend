@@ -220,6 +220,7 @@ function sanitizeConfession(post, viewerState = {}) {
         confessionId: post.id,
         roomId: post.roomId,
         alias: post.alias,
+        authorAvatar: post.authorAvatar || null,
         content: post.content || '',
         hasAudio,
         audio: hasAudio || audioMeta.duration ? {
@@ -255,6 +256,7 @@ function sanitizeReply(reply, viewerState = {}) {
         confessionId: reply.confessionId,
         roomId: reply.roomId,
         alias: reply.alias,
+        authorAvatar: reply.authorAvatar || null,
         content: reply.content,
         parentReplyId: reply.parentReplyId || null,
         parentAlias: reply.parentAlias || null,
@@ -264,6 +266,28 @@ function sanitizeReply(reply, viewerState = {}) {
         sentimentScore: reply.sentimentScore,
         likedByViewer: !!viewerState.likedByViewer
     };
+}
+
+async function attachAuthorAvatars(items) {
+    if (!items || !items.length) return items;
+    
+    // items could be confessions or replies, they have 'author'
+    const authorIds = [...new Set(items.map(item => Number(item.author)).filter(Boolean))];
+    if (!authorIds.length) return items;
+    
+    const users = await User.find({ id: { $in: authorIds } }).select({ id: 1, 'preferences.avatar': 1 }).lean();
+    const avatarMap = new Map();
+    for (const u of users) {
+        avatarMap.set(u.id, u.preferences?.avatar || '🌊');
+    }
+    
+    for (const item of items) {
+        if (item.author && avatarMap.has(Number(item.author))) {
+            item.authorAvatar = avatarMap.get(Number(item.author));
+        }
+    }
+    
+    return items;
 }
 
 async function buildConfessionViewerStateMap({ userId, roomId, confessionIds = [] }) {
@@ -569,7 +593,18 @@ async function listRoomMembers({ userId = null, roomId }) {
         .sort({ lastActiveAt: -1, joinedAt: -1, alias: 1 })
         .lean();
 
-    return members.map(sanitizeRoomMember);
+    const sanitized = members.map(sanitizeRoomMember);
+    const userIds = [...new Set(sanitized.map(m => m.userId).filter(Boolean))];
+    if (userIds.length > 0) {
+        const users = await User.find({ id: { $in: userIds } }).select({ id: 1, 'preferences.avatar': 1 }).lean();
+        const avatarMap = new Map(users.map(u => [u.id, u.preferences?.avatar || '🌊']));
+        for (const m of sanitized) {
+            if (m.userId && avatarMap.has(m.userId)) {
+                m.avatar = avatarMap.get(m.userId);
+            }
+        }
+    }
+    return sanitized;
 }
 
 async function reserveRoomSlot(roomId) {
@@ -1254,6 +1289,8 @@ async function listMyConfessions({ userId, limit = 50 }) {
         viewerStateByRoom.set(rid, stateMap);
     }
 
+    await attachAuthorAvatars(posts);
+
     return posts.map((post) => {
         const room = roomMap.get(Number(post.roomId)) || null;
         const viewerState = (viewerStateByRoom.get(Number(post.roomId)) || new Map()).get(Number(post.id)) || {};
@@ -1391,6 +1428,7 @@ async function postConfession({ userId, roomId, content, scheduledAt = null, aud
         await incrementRoomMetric(rid, { flags: 1 });
     }
 
+    await attachAuthorAvatars([post]);
     const safePost = sanitizeConfession(post);
 
     if (scheduledDate) {
@@ -1452,6 +1490,8 @@ async function listConfessions({ userId, roomId, limit = 50, sortBy = 'ranked' }
         roomId: rid,
         confessionIds: posts.map((post) => Number(post && post.id))
     });
+
+    await attachAuthorAvatars(posts);
 
     if (sortBy === 'latest') {
         const scored = posts.map((post) => ({
@@ -2234,6 +2274,7 @@ async function publishScheduledConfession(post) {
     await incrementRoomMetric(rid, { confessions: 1 });
     await updateRoomEngagementRate(rid);
 
+    await attachAuthorAvatars([publishedPost]);
     const safePost = sanitizeConfession(publishedPost);
     emitter.emit('confession_created', { roomId: rid, confession: safePost });
     return safePost;

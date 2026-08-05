@@ -179,10 +179,16 @@ async function listFeed({ userId, limit = 20, offset = 0 }) {
         likedSet = new Set(userLikes.map(like => like.confessionId.toString()));
     }
 
+    const authorIds = [...new Set(confessions.map(c => c.author).filter(Boolean))];
+    const User = require('../models/user.model');
+    const users = await User.find({ id: { $in: authorIds } }).select({ id: 1, 'preferences.avatar': 1 }).lean();
+    const avatarMap = new Map(users.map(u => [u.id, u.preferences?.avatar || null]));
+
     return confessions.map(c => ({
         _id: c._id,
         id: c.id,
         content: c.content,
+        authorAvatar: avatarMap.get(c.author) || null,
         likesCount: c.likesCount || 0,
         reactionCount: c.likesCount || c.reactionCount || 0,
         likedByCurrentUser: likedSet.has(c._id.toString()),
@@ -224,10 +230,25 @@ async function listFeedAggregation({ userId, limit = 20, offset = 0 }) {
             }
         },
         {
+            $lookup: {
+                from: 'users',
+                localField: 'author',
+                foreignField: 'id',
+                as: 'authorDoc'
+            }
+        },
+        {
+            $unwind: {
+                path: '$authorDoc',
+                preserveNullAndEmptyArrays: true
+            }
+        },
+        {
             $project: {
                 _id: 1,
                 id: 1,
                 content: 1,
+                authorAvatar: '$authorDoc.preferences.avatar',
                 likesCount: 1,
                 reactionCount: '$likesCount',
                 createdAt: 1,
