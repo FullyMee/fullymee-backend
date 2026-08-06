@@ -261,7 +261,7 @@ function emitConversationLifecycle(eventName, payload) {
     }
 }
 
-function sanitizeChatRequest(row, viewerUserId) {
+function sanitizeChatRequest(row, viewerUserId, avatar = null) {
     const viewerId = Number(viewerUserId);
     const isIncoming = Number(row.targetUserId) === viewerId;
     const displayAlias = isIncoming ? row.requesterAlias : row.targetAlias;
@@ -275,6 +275,7 @@ function sanitizeChatRequest(row, viewerUserId) {
         contextType: row.contextType || 'confession',
         contextPreview: row.contextPreview || '',
         displayAlias,
+        displayAvatar: avatar || null,
         requesterAlias: row.requesterAlias,
         targetAlias: row.targetAlias,
         createdAt: row.createdAt,
@@ -355,6 +356,20 @@ exports.getUserConversations = async (userId, options = {}) => {
     const sanitized = rows
         .map((row) => sanitizeConversationForViewer(row, uid))
         .filter((row) => !row.isDeletedForMe);
+
+    const allParticipantIds = [...new Set(sanitized.flatMap(c => c.participants))].filter(Boolean);
+    const User = require('../models/user.model');
+    const users = await User.find({ id: { $in: allParticipantIds } }).select({ _id: 0, id: 1, 'preferences.avatar': 1 }).lean();
+    const avatarMap = new Map(users.map(u => [u.id, u.preferences?.avatar || null]));
+
+    for (const conv of sanitized) {
+        conv.participantAvatars = {};
+        for (const pId of conv.participants) {
+            if (avatarMap.has(pId)) {
+                conv.participantAvatars[String(pId)] = avatarMap.get(pId);
+            }
+        }
+    }
 
     if (view === 'all') {
         return sanitized;
@@ -723,11 +738,21 @@ exports.listChatRequests = async (userId) => {
             .lean()
     ]);
 
+    const userIds = [
+        ...pendingIncomingRows.map(r => r.requesterUserId),
+        ...outgoingPendingRows.map(r => r.targetUserId),
+        ...acceptedRows.map(r => r.requesterUserId === uid ? r.targetUserId : r.requesterUserId)
+    ];
+    const uniqueUserIds = [...new Set(userIds.filter(Boolean))];
+    const User = require('../models/user.model');
+    const users = await User.find({ id: { $in: uniqueUserIds } }).select({ _id: 0, id: 1, 'preferences.avatar': 1 }).lean();
+    const avatarMap = new Map(users.map(u => [u.id, u.preferences?.avatar || null]));
+
     return {
         pendingIncomingCount: pendingIncomingRows.length,
-        pending: pendingIncomingRows.map((row) => sanitizeChatRequest(row, uid)),
-        outgoingPending: outgoingPendingRows.map((row) => sanitizeChatRequest(row, uid)),
-        accepted: acceptedRows.map((row) => sanitizeChatRequest(row, uid))
+        pending: pendingIncomingRows.map((row) => sanitizeChatRequest(row, uid, avatarMap.get(row.requesterUserId))),
+        outgoingPending: outgoingPendingRows.map((row) => sanitizeChatRequest(row, uid, avatarMap.get(row.targetUserId))),
+        accepted: acceptedRows.map((row) => sanitizeChatRequest(row, uid, avatarMap.get(row.requesterUserId === uid ? row.targetUserId : row.requesterUserId)))
     };
 };
 

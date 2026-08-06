@@ -251,20 +251,26 @@ exports.getAllUsers = async (req, res) => {
         }
 
         const rows = await User.find(filter)
-            .select({ _id: 0, id: 1, username: 1 })
+            .select({ _id: 0, id: 1, username: 1, 'preferences.avatar': 1 })
             .sort({ id: 1 })
             .skip(offset)
             .limit(paginate ? requestedLimit + 1 : 0)
             .lean();
 
+        const mappedRows = rows.map(row => ({
+            id: row.id,
+            username: row.username,
+            avatar: row.preferences?.avatar || null
+        }));
+
         if (paginate) {
             return res.status(200).json({
-                items: rows.slice(0, requestedLimit),
-                hasMore: rows.length > requestedLimit
+                items: mappedRows.slice(0, requestedLimit),
+                hasMore: mappedRows.length > requestedLimit
             });
         }
 
-        res.status(200).json(rows);
+        res.status(200).json(mappedRows);
     } catch (err) {
         console.error("Failed to fetch users", err);
         res.status(500).json({ error: "Failed to fetch users" });

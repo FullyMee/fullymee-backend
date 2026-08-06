@@ -213,13 +213,14 @@ function sanitizeRoom(room, alias, { userId = null, includeJoinCode = false } = 
     return safeRoom;
 }
 
-function sanitizeConfession(post, viewerState = {}) {
+function sanitizeConfession(post, viewerState = {}, avatar = null) {
     const audioMeta = post && post.audioMeta ? post.audioMeta : {};
     const hasAudio = !!audioMeta.publicId;
     return {
         confessionId: post.id,
         roomId: post.roomId,
         alias: post.alias,
+        avatar: avatar || null,
         content: post.content || '',
         hasAudio,
         audio: hasAudio || audioMeta.duration ? {
@@ -249,12 +250,13 @@ async function cleanupAudioMeta(audioMeta) {
     }
 }
 
-function sanitizeReply(reply, viewerState = {}) {
+function sanitizeReply(reply, viewerState = {}, avatar = null) {
     return {
         replyId: reply.id,
         confessionId: reply.confessionId,
         roomId: reply.roomId,
         alias: reply.alias,
+        avatar: avatar || null,
         content: reply.content,
         parentReplyId: reply.parentReplyId || null,
         parentAlias: reply.parentAlias || null,
@@ -569,7 +571,16 @@ async function listRoomMembers({ userId = null, roomId }) {
         .sort({ lastActiveAt: -1, joinedAt: -1, alias: 1 })
         .lean();
 
-    return members.map(sanitizeRoomMember);
+    const userIds = [...new Set(members.map(m => Number(m.userId)).filter(Boolean))];
+    const User = require('../models/user.model');
+    const users = await User.find({ id: { $in: userIds } }).select({ _id: 0, id: 1, 'preferences.avatar': 1 }).lean();
+    const avatarMap = new Map(users.map(u => [u.id, u.preferences?.avatar || null]));
+
+    return members.map(member => {
+        const safe = sanitizeRoomMember(member);
+        safe.avatar = avatarMap.get(safe.userId) || null;
+        return safe;
+    });
 }
 
 async function reserveRoomSlot(roomId) {
@@ -1254,11 +1265,16 @@ async function listMyConfessions({ userId, limit = 50 }) {
         viewerStateByRoom.set(rid, stateMap);
     }
 
+    const userIds = [...new Set(posts.map(p => Number(p.author)).filter(Boolean))];
+    const User = require('../models/user.model');
+    const users = await User.find({ id: { $in: userIds } }).select({ _id: 0, id: 1, 'preferences.avatar': 1 }).lean();
+    const avatarMap = new Map(users.map(u => [u.id, u.preferences?.avatar || null]));
+
     return posts.map((post) => {
         const room = roomMap.get(Number(post.roomId)) || null;
         const viewerState = (viewerStateByRoom.get(Number(post.roomId)) || new Map()).get(Number(post.id)) || {};
         return {
-            ...sanitizeConfession(post, viewerState),
+            ...sanitizeConfession(post, viewerState, avatarMap.get(Number(post.author))),
             roomTitle: room && room.title ? room.title : 'Room',
             roomCategory: room && room.category ? room.category : 'general',
             roomMemberCount: room && Number.isFinite(Number(room.currentUserCount)) ? Number(room.currentUserCount) : 0
@@ -1453,9 +1469,14 @@ async function listConfessions({ userId, roomId, limit = 50, sortBy = 'ranked' }
         confessionIds: posts.map((post) => Number(post && post.id))
     });
 
+    const userIds = [...new Set(posts.map(p => Number(p.author)).filter(Boolean))];
+    const User = require('../models/user.model');
+    const users = await User.find({ id: { $in: userIds } }).select({ _id: 0, id: 1, 'preferences.avatar': 1 }).lean();
+    const avatarMap = new Map(users.map(u => [u.id, u.preferences?.avatar || null]));
+
     if (sortBy === 'latest') {
         const scored = posts.map((post) => ({
-            ...sanitizeConfession(post, viewerStateMap.get(Number(post.id)) || {}),
+            ...sanitizeConfession(post, viewerStateMap.get(Number(post.id)) || {}, avatarMap.get(Number(post.author))),
             _latestScore: computeLatestConfessionScore(post)
         }));
         return scored
@@ -1468,7 +1489,7 @@ async function listConfessions({ userId, roomId, limit = 50, sortBy = 'ranked' }
             .map(({ _latestScore, ...rest }) => rest);
     }
 
-    return posts.map((post) => sanitizeConfession(post, viewerStateMap.get(Number(post.id)) || {}));
+    return posts.map((post) => sanitizeConfession(post, viewerStateMap.get(Number(post.id)) || {}, avatarMap.get(Number(post.author))));
 }
 
 async function getAudioUploadToken({ userId, roomId }) {
@@ -1681,7 +1702,12 @@ async function listReplies({ userId, roomId, confessionId, limit = 50 }) {
         replyIds: replies.map((reply) => Number(reply && reply.id))
     });
 
-    return replies.map((reply) => sanitizeReply(reply, viewerStateMap.get(Number(reply.id)) || {}));
+    const userIds = [...new Set(replies.map(r => Number(r.author)).filter(Boolean))];
+    const User = require('../models/user.model');
+    const users = await User.find({ id: { $in: userIds } }).select({ _id: 0, id: 1, 'preferences.avatar': 1 }).lean();
+    const avatarMap = new Map(users.map(u => [u.id, u.preferences?.avatar || null]));
+
+    return replies.map((reply) => sanitizeReply(reply, viewerStateMap.get(Number(reply.id)) || {}, avatarMap.get(Number(reply.author))));
 }
 
 async function reactToTarget({ userId, roomId, targetType, targetId, reactionType }) {
