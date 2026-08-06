@@ -23,7 +23,7 @@ const profileUpdateSchema = z.object({
     interests: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
 
     // Identity preferences
-    avatar: z.string().trim().max(10).optional(),
+    avatar: z.string().trim().max(50).optional(),
 
     // Chat controls
     chatRequestPermission: z.enum(['everyone', 'nobody']).optional(),
@@ -49,7 +49,7 @@ function formatUserResponse(user, isAdmin) {
         isAdmin,
         createdAt: user.createdAt,
         preferences: {
-            avatar: (user.preferences && user.preferences.avatar) || '🌊',
+            avatar: (user.preferences && user.preferences.avatar) || 'flowing_waterfall',
             chatRequestPermission: (user.preferences && user.preferences.chatRequestPermission) || 'everyone',
             limitNighttimeRequests: !!(user.preferences && user.preferences.limitNighttimeRequests),
             hideJoinedRooms: !!(user.preferences && user.preferences.hideJoinedRooms),
@@ -175,7 +175,7 @@ router.get('/:identifier/profile', authenticate, async (req, res) => {
                 isSelf: true,
                 userId: currentUserId,
                 username: currentUser?.username || identifier,
-                avatar: currentUser?.preferences?.avatar || '🌊',
+                avatar: currentUser?.preferences?.avatar || null,
                 createdAt: currentUser?.createdAt
             });
         }
@@ -271,7 +271,7 @@ router.get('/:identifier/profile', authenticate, async (req, res) => {
             conversationId,
             userId: targetUserId,
             username: targetUser ? targetUser.username : identifier,
-            avatar: targetUser ? (targetUser.preferences?.avatar || '🌊') : '🌊',
+            avatar: targetUser ? targetUser.preferences?.avatar : null,
             createdAt: targetUser ? targetUser.createdAt : null,
             stats: {
                 confessions: confessionsCount,

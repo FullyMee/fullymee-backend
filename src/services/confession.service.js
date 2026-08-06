@@ -213,14 +213,14 @@ function sanitizeRoom(room, alias, { userId = null, includeJoinCode = false } = 
     return safeRoom;
 }
 
-function sanitizeConfession(post, viewerState = {}) {
+function sanitizeConfession(post, viewerState = {}, avatar = null) {
     const audioMeta = post && post.audioMeta ? post.audioMeta : {};
     const hasAudio = !!audioMeta.publicId;
     return {
         confessionId: post.id,
         roomId: post.roomId,
         alias: post.alias,
-        authorAvatar: post.authorAvatar || null,
+        avatar: avatar || null,
         content: post.content || '',
         hasAudio,
         audio: hasAudio || audioMeta.duration ? {
@@ -250,13 +250,13 @@ async function cleanupAudioMeta(audioMeta) {
     }
 }
 
-function sanitizeReply(reply, viewerState = {}) {
+function sanitizeReply(reply, viewerState = {}, avatar = null) {
     return {
         replyId: reply.id,
         confessionId: reply.confessionId,
         roomId: reply.roomId,
         alias: reply.alias,
-        authorAvatar: reply.authorAvatar || null,
+        avatar: avatar || null,
         content: reply.content,
         parentReplyId: reply.parentReplyId || null,
         parentAlias: reply.parentAlias || null,
@@ -270,23 +270,23 @@ function sanitizeReply(reply, viewerState = {}) {
 
 async function attachAuthorAvatars(items) {
     if (!items || !items.length) return items;
-    
+
     // items could be confessions or replies, they have 'author'
     const authorIds = [...new Set(items.map(item => Number(item.author)).filter(Boolean))];
     if (!authorIds.length) return items;
-    
+
     const users = await User.find({ id: { $in: authorIds } }).select({ id: 1, 'preferences.avatar': 1 }).lean();
     const avatarMap = new Map();
     for (const u of users) {
         avatarMap.set(u.id, u.preferences?.avatar || '🌊');
     }
-    
+
     for (const item of items) {
         if (item.author && avatarMap.has(Number(item.author))) {
             item.authorAvatar = avatarMap.get(Number(item.author));
         }
     }
-    
+
     return items;
 }
 
@@ -593,18 +593,16 @@ async function listRoomMembers({ userId = null, roomId }) {
         .sort({ lastActiveAt: -1, joinedAt: -1, alias: 1 })
         .lean();
 
-    const sanitized = members.map(sanitizeRoomMember);
-    const userIds = [...new Set(sanitized.map(m => m.userId).filter(Boolean))];
-    if (userIds.length > 0) {
-        const users = await User.find({ id: { $in: userIds } }).select({ id: 1, 'preferences.avatar': 1 }).lean();
-        const avatarMap = new Map(users.map(u => [u.id, u.preferences?.avatar || '🌊']));
-        for (const m of sanitized) {
-            if (m.userId && avatarMap.has(m.userId)) {
-                m.avatar = avatarMap.get(m.userId);
-            }
-        }
-    }
-    return sanitized;
+    const userIds = [...new Set(members.map(m => Number(m.userId)).filter(Boolean))];
+    const User = require('../models/user.model');
+    const users = await User.find({ id: { $in: userIds } }).select({ _id: 0, id: 1, 'preferences.avatar': 1 }).lean();
+    const avatarMap = new Map(users.map(u => [u.id, u.preferences?.avatar || null]));
+
+    return members.map(member => {
+        const safe = sanitizeRoomMember(member);
+        safe.avatar = avatarMap.get(safe.userId) || null;
+        return safe;
+    });
 }
 
 async function reserveRoomSlot(roomId) {
@@ -1289,13 +1287,16 @@ async function listMyConfessions({ userId, limit = 50 }) {
         viewerStateByRoom.set(rid, stateMap);
     }
 
-    await attachAuthorAvatars(posts);
+    const userIds = [...new Set(posts.map(p => Number(p.author)).filter(Boolean))];
+    const User = require('../models/user.model');
+    const users = await User.find({ id: { $in: userIds } }).select({ _id: 0, id: 1, 'preferences.avatar': 1 }).lean();
+    const avatarMap = new Map(users.map(u => [u.id, u.preferences?.avatar || null]));
 
     return posts.map((post) => {
         const room = roomMap.get(Number(post.roomId)) || null;
         const viewerState = (viewerStateByRoom.get(Number(post.roomId)) || new Map()).get(Number(post.id)) || {};
         return {
-            ...sanitizeConfession(post, viewerState),
+            ...sanitizeConfession(post, viewerState, avatarMap.get(Number(post.author))),
             roomTitle: room && room.title ? room.title : 'Room',
             roomCategory: room && room.category ? room.category : 'general',
             roomMemberCount: room && Number.isFinite(Number(room.currentUserCount)) ? Number(room.currentUserCount) : 0
@@ -1491,11 +1492,14 @@ async function listConfessions({ userId, roomId, limit = 50, sortBy = 'ranked' }
         confessionIds: posts.map((post) => Number(post && post.id))
     });
 
-    await attachAuthorAvatars(posts);
+    const userIds = [...new Set(posts.map(p => Number(p.author)).filter(Boolean))];
+    const User = require('../models/user.model');
+    const users = await User.find({ id: { $in: userIds } }).select({ _id: 0, id: 1, 'preferences.avatar': 1 }).lean();
+    const avatarMap = new Map(users.map(u => [u.id, u.preferences?.avatar || null]));
 
     if (sortBy === 'latest') {
         const scored = posts.map((post) => ({
-            ...sanitizeConfession(post, viewerStateMap.get(Number(post.id)) || {}),
+            ...sanitizeConfession(post, viewerStateMap.get(Number(post.id)) || {}, avatarMap.get(Number(post.author))),
             _latestScore: computeLatestConfessionScore(post)
         }));
         return scored
@@ -1508,7 +1512,7 @@ async function listConfessions({ userId, roomId, limit = 50, sortBy = 'ranked' }
             .map(({ _latestScore, ...rest }) => rest);
     }
 
-    return posts.map((post) => sanitizeConfession(post, viewerStateMap.get(Number(post.id)) || {}));
+    return posts.map((post) => sanitizeConfession(post, viewerStateMap.get(Number(post.id)) || {}, avatarMap.get(Number(post.author))));
 }
 
 async function getAudioUploadToken({ userId, roomId }) {
@@ -1721,7 +1725,12 @@ async function listReplies({ userId, roomId, confessionId, limit = 50 }) {
         replyIds: replies.map((reply) => Number(reply && reply.id))
     });
 
-    return replies.map((reply) => sanitizeReply(reply, viewerStateMap.get(Number(reply.id)) || {}));
+    const userIds = [...new Set(replies.map(r => Number(r.author)).filter(Boolean))];
+    const User = require('../models/user.model');
+    const users = await User.find({ id: { $in: userIds } }).select({ _id: 0, id: 1, 'preferences.avatar': 1 }).lean();
+    const avatarMap = new Map(users.map(u => [u.id, u.preferences?.avatar || null]));
+
+    return replies.map((reply) => sanitizeReply(reply, viewerStateMap.get(Number(reply.id)) || {}, avatarMap.get(Number(reply.author))));
 }
 
 async function reactToTarget({ userId, roomId, targetType, targetId, reactionType }) {
@@ -2388,10 +2397,12 @@ async function publishDueScheduledConfessions(getOnlineUsers) {
         scheduleStatus: 'pending',
         scheduledAt: { $lte: now }
     })
-        .select({ _id: 0, id: 1, roomId: 1, author: 1, alias: 1, content: 1, scheduledAt: 1, audioMeta: 1,
+        .select({
+            _id: 0, id: 1, roomId: 1, author: 1, alias: 1, content: 1, scheduledAt: 1, audioMeta: 1,
             shardKey: 1, contentHash: 1, moderationStatus: 1, moderationSeverity: 1,
             moderationReasons: 1, sentimentScore: 1, rankingScore: 1, isHidden: 1,
-            likesCount: 1, replyCount: 1, reactionCount: 1, createdAt: 1, updatedAt: 1 })
+            likesCount: 1, replyCount: 1, reactionCount: 1, createdAt: 1, updatedAt: 1
+        })
         .lean();
 
     const onlineUsers = typeof getOnlineUsers === 'function' ? getOnlineUsers() : null;
@@ -2431,10 +2442,12 @@ async function publishDueScheduledConfessions(getOnlineUsers) {
         scheduleStatus: 'confirming',
         confirmExpiresAt: { $lte: now }
     })
-        .select({ _id: 0, id: 1, roomId: 1, author: 1, alias: 1, content: 1, scheduledAt: 1,
+        .select({
+            _id: 0, id: 1, roomId: 1, author: 1, alias: 1, content: 1, scheduledAt: 1,
             shardKey: 1, contentHash: 1, moderationStatus: 1, moderationSeverity: 1,
             moderationReasons: 1, sentimentScore: 1, rankingScore: 1, isHidden: 1,
-            likesCount: 1, replyCount: 1, reactionCount: 1, createdAt: 1, updatedAt: 1 })
+            likesCount: 1, replyCount: 1, reactionCount: 1, createdAt: 1, updatedAt: 1
+        })
         .lean();
 
     for (const post of expiredConfirming) {

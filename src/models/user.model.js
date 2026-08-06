@@ -3,7 +3,7 @@ const { mongoose } = require('../config/db');
 const preferencesSchema = new mongoose.Schema(
     {
         // Identity
-        avatar: { type: String, trim: true, maxlength: 10, default: '🌊' },
+        avatar: { type: String, trim: true, maxlength: 50, default: 'flowing_waterfall' },
 
         // Chat Controls
         chatRequestPermission: {
