@@ -268,6 +268,28 @@ function sanitizeReply(reply, viewerState = {}, avatar = null) {
     };
 }
 
+async function attachAuthorAvatars(items) {
+    if (!items || !items.length) return items;
+
+    // items could be confessions or replies, they have 'author'
+    const authorIds = [...new Set(items.map(item => Number(item.author)).filter(Boolean))];
+    if (!authorIds.length) return items;
+
+    const users = await User.find({ id: { $in: authorIds } }).select({ id: 1, 'preferences.avatar': 1 }).lean();
+    const avatarMap = new Map();
+    for (const u of users) {
+        avatarMap.set(u.id, u.preferences?.avatar || '🌊');
+    }
+
+    for (const item of items) {
+        if (item.author && avatarMap.has(Number(item.author))) {
+            item.authorAvatar = avatarMap.get(Number(item.author));
+        }
+    }
+
+    return items;
+}
+
 async function buildConfessionViewerStateMap({ userId, roomId, confessionIds = [] }) {
     const uid = Number(userId);
     const rid = Number(roomId);
@@ -1407,6 +1429,7 @@ async function postConfession({ userId, roomId, content, scheduledAt = null, aud
         await incrementRoomMetric(rid, { flags: 1 });
     }
 
+    await attachAuthorAvatars([post]);
     const safePost = sanitizeConfession(post);
 
     if (scheduledDate) {
@@ -2260,6 +2283,7 @@ async function publishScheduledConfession(post) {
     await incrementRoomMetric(rid, { confessions: 1 });
     await updateRoomEngagementRate(rid);
 
+    await attachAuthorAvatars([publishedPost]);
     const safePost = sanitizeConfession(publishedPost);
     emitter.emit('confession_created', { roomId: rid, confession: safePost });
     return safePost;
@@ -2373,10 +2397,12 @@ async function publishDueScheduledConfessions(getOnlineUsers) {
         scheduleStatus: 'pending',
         scheduledAt: { $lte: now }
     })
-        .select({ _id: 0, id: 1, roomId: 1, author: 1, alias: 1, content: 1, scheduledAt: 1, audioMeta: 1,
+        .select({
+            _id: 0, id: 1, roomId: 1, author: 1, alias: 1, content: 1, scheduledAt: 1, audioMeta: 1,
             shardKey: 1, contentHash: 1, moderationStatus: 1, moderationSeverity: 1,
             moderationReasons: 1, sentimentScore: 1, rankingScore: 1, isHidden: 1,
-            likesCount: 1, replyCount: 1, reactionCount: 1, createdAt: 1, updatedAt: 1 })
+            likesCount: 1, replyCount: 1, reactionCount: 1, createdAt: 1, updatedAt: 1
+        })
         .lean();
 
     const onlineUsers = typeof getOnlineUsers === 'function' ? getOnlineUsers() : null;
@@ -2416,10 +2442,12 @@ async function publishDueScheduledConfessions(getOnlineUsers) {
         scheduleStatus: 'confirming',
         confirmExpiresAt: { $lte: now }
     })
-        .select({ _id: 0, id: 1, roomId: 1, author: 1, alias: 1, content: 1, scheduledAt: 1,
+        .select({
+            _id: 0, id: 1, roomId: 1, author: 1, alias: 1, content: 1, scheduledAt: 1,
             shardKey: 1, contentHash: 1, moderationStatus: 1, moderationSeverity: 1,
             moderationReasons: 1, sentimentScore: 1, rankingScore: 1, isHidden: 1,
-            likesCount: 1, replyCount: 1, reactionCount: 1, createdAt: 1, updatedAt: 1 })
+            likesCount: 1, replyCount: 1, reactionCount: 1, createdAt: 1, updatedAt: 1
+        })
         .lean();
 
     for (const post of expiredConfirming) {
