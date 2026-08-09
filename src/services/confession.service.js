@@ -25,6 +25,8 @@ const {
 } = require('./bloomFilter.service');
 const conversationService = require('./conversation.service');
 const audioService = require('./audio.service');
+const { normalizeCategoryKey } = require('./ambienceSelector.service');
+const { AMBIENCE_LIBRARY } = require('../config/ambiences');
 
 const emitter = new EventEmitter();
 const MAX_AUDIO_DURATION_SECONDS = Number(process.env.AUDIO_MAX_DURATION_SECONDS || 30);
@@ -195,6 +197,7 @@ function sanitizeRoom(room, alias, { userId = null, includeJoinCode = false } = 
         title: room.title,
         description: room.description,
         category: room.category,
+        ambienceId: room.ambienceId || null,
         maxCapacity: room.maxCapacity,
         currentUserCount: room.currentUserCount,
         createdAt: room.createdAt,
@@ -626,6 +629,7 @@ async function reserveRoomSlot(roomId) {
         .lean();
 }
 
+
 async function createRoomInstance({
     category,
     roomType = 'public',
@@ -636,7 +640,8 @@ async function createRoomInstance({
     joinCode = null,
     expiresAt = null,
     createdByUserId = null,
-    initialUserCount = 0
+    initialUserCount = 0,
+    ambienceId = null
 }) {
     const now = new Date();
     const normalizedCategory = normalizeCategory(category);
@@ -647,6 +652,16 @@ async function createRoomInstance({
         roomType: normalizedRoomType,
         title: roomTitle
     });
+
+    const poolCategory = normalizeCategoryKey(normalizedCategory);
+    const pool = AMBIENCE_LIBRARY.filter((a) => a.category === poolCategory);
+    let assignedAmbienceId = String(ambienceId || '').trim();
+    const isValid = assignedAmbienceId ? (AMBIENCE_LIBRARY.some((a) => a.id === assignedAmbienceId) || true) : false;
+
+    if (!assignedAmbienceId || !isValid) {
+        // Fallback: use the first image in the pool for this category
+        assignedAmbienceId = pool.length > 0 ? pool[0].id : 'moonlit_window';
+    }
 
     const existingLatest = await ConfessionRoom.findOne({ roomFamilyKey })
         .sort({ roomInstance: -1 })
@@ -668,6 +683,7 @@ async function createRoomInstance({
         title: roomTitle,
         description: String(description || '').trim(),
         category: normalizedCategory,
+        ambienceId: assignedAmbienceId,
         tags: (Array.isArray(tags) ? tags : []).map((v) => normalizeCategory(v)),
         roomFamilyKey,
         roomInstance,
@@ -951,7 +967,8 @@ async function createRoom({
     description = '',
     category = 'general',
     roomType = 'public',
-    joinCode = null
+    joinCode = null,
+    ambienceId = null
 }) {
     const uid = Number(userId);
     if (!uid) throw createServiceError('INVALID_USER', 'Invalid user', 401);
@@ -993,7 +1010,8 @@ async function createRoom({
                 maxCapacity: getDefaultRoomCapacity(),
                 joinCode: effectiveJoinCode,
                 createdByUserId: uid,
-                initialUserCount: 0
+                initialUserCount: 0,
+                ambienceId
             });
 
             return joinRoom({
@@ -1172,6 +1190,7 @@ async function listPublicRooms({ limit = 100, offset = 0, sortBy = 'discover', s
         title: 1,
         description: 1,
         category: 1,
+        ambienceId: 1,
         maxCapacity: 1,
         currentUserCount: 1,
         roomType: 1,
@@ -1260,7 +1279,7 @@ async function listMyConfessions({ userId, limit = 50 }) {
     const roomIds = [...new Set(posts.map((post) => Number(post && post.roomId)).filter(Boolean))];
     const rooms = roomIds.length
         ? await ConfessionRoom.find({ id: { $in: roomIds } })
-            .select({ _id: 0, id: 1, title: 1, category: 1, currentUserCount: 1 })
+            .select({ _id: 0, id: 1, title: 1, category: 1, ambienceId: 1, currentUserCount: 1 })
             .lean()
         : [];
 

@@ -7,6 +7,7 @@ const confessionRoomSchema = new mongoose.Schema(
         title: { type: String, required: true, trim: true, maxlength: 120 },
         description: { type: String, default: '', trim: true, maxlength: 500 },
         category: { type: String, required: true, trim: true, lowercase: true, index: true },
+        ambienceId: { type: String, default: null, trim: true },
         tags: [{ type: String, trim: true, lowercase: true }],
         roomFamilyKey: { type: String, required: true, trim: true, lowercase: true, index: true },
         roomInstance: { type: Number, required: true, default: 1 },

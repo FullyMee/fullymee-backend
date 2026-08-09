@@ -14,10 +14,11 @@ exports.joinRoomSchema = z.object({
 
 exports.createRoomSchema = z.object({
     title: z.string().trim().min(3).max(120),
-    description: z.string().trim().max(500).optional(),
-    category: z.string().trim().min(1).max(50).optional(),
+    description: z.string().trim().max(500).nullable().optional(),
+    category: z.string().trim().min(1).max(50).nullable().optional(),
     roomType: z.enum(['public', 'private']),
-    joinCode: z.string().trim().regex(/^\d{6}$/, 'Enter a valid 6 digit code').optional()
+    joinCode: z.string().trim().regex(/^\d{6}$/, 'Enter a valid 6 digit code').nullable().optional(),
+    ambienceId: z.string().trim().min(1).max(80).nullable().optional()
 });
 
 exports.joinRoomByCodeSchema = z.object({

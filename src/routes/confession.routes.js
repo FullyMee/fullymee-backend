@@ -33,7 +33,7 @@ router.post('/rooms/:roomId/reports', authenticate, confessionController.report)
 
 router.get('/analytics/summary', authenticate, confessionController.analyticsSummary);
 router.get('/moderation/queue', authenticate, requireModerationAdmin, confessionController.listModerationQueue);
-// Instagram-style Likes & Feed Routes
+// FullyMee Likes & Feed Routes
 router.post('/:id/like', authenticate, confessionController.likeConfession);
 router.post('/replies/:id/like', authenticate, confessionController.likeReply);
 router.post('/', authenticate, confessionController.createConfession);
