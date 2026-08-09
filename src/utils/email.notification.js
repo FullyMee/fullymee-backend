@@ -57,8 +57,13 @@ function getTransporter() {
     // Remove accidental spaces (very common copy-paste issue)
     const pass = rawPass.replace(/\s+/g, '');
 
-    // ⭐ IMPORTANT — Read from environment instead of hardcoding
-    const secure = String(process.env.SMTP_SECURE).toLowerCase() === 'true';
+    // ⭐ Auto-detect secure flag: port 465 requires secure=true, port 587 requires secure=false (unless explicitly overridden)
+    let secure;
+    if (process.env.SMTP_SECURE !== undefined && String(process.env.SMTP_SECURE).trim() !== '') {
+        secure = String(process.env.SMTP_SECURE).toLowerCase() === 'true';
+    } else {
+        secure = port === 465;
+    }
 
     const dkim = getDkimConfig();
     smtpConfig = { host, port, secure, user, dkim: Boolean(dkim) };
@@ -68,9 +73,12 @@ function getTransporter() {
         port,
         secure,
         auth: { user, pass },
-        connectionTimeout: 10000,
-        greetingTimeout: 10000,
-        socketTimeout: 10000
+        connectionTimeout: 15000,
+        greetingTimeout: 15000,
+        socketTimeout: 15000,
+        tls: {
+            rejectUnauthorized: false
+        }
     };
 
     if (dkim) {
@@ -110,6 +118,7 @@ async function sendMailWithRetry(mail) {
 
             return info;
         } catch (err) {
+            transporter = null; // Reset transporter on failure to force fresh connection on retry
             lastError = err;
             if (attempt >= maxAttempts || !isTransientEmailError(err)) {
                 throw err;

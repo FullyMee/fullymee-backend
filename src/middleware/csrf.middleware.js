@@ -26,11 +26,6 @@ module.exports = function verifyCsrfToken(req, res, next) {
     const headerToken = getCsrfTokenHeader(req);
     const cookieToken = getCsrfCookie(req);
 
-    console.log("Origin:", req.headers.origin);
-    console.log("Cookie Header:", req.headers.cookie);
-    console.log("Header Token:", headerToken);
-    console.log("Cookie Token:", cookieToken);
-
     if (!headerToken || !cookieToken || headerToken !== cookieToken) {
         return res.status(403).json({ error: "Invalid CSRF token" });
     }

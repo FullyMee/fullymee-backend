@@ -57,6 +57,7 @@ exports.joinRoom = async (req, res) => {
     }
 };
 
+
 exports.createRoom = async (req, res) => {
     try {
         const userId = req.user && req.user.userId;
