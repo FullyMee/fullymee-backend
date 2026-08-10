@@ -109,7 +109,8 @@ exports.getMyConversations = async (req, res) => {
     try {
         const userId = req.user.userId;
         const view = String((req.query && req.query.view) || 'active');
-        const conversations = await conversationService.getUserConversations(userId, { view });
+        const conversationId = Number((req.query && req.query.conversationId) || 0);
+        const conversations = await conversationService.getUserConversations(userId, { view, conversationId });
         res.status(200).json(conversations);
     } catch (err) {
         console.error("Fetch Conversations Error:", err);
@@ -121,7 +122,8 @@ exports.getConversations = async (req, res) => {
     try {
         const userId = req.user && req.user.userId;
         const view = String((req.query && req.query.view) || 'active');
-        const conversations = await conversationService.getUserConversations(userId, { view });
+        const conversationId = Number((req.query && req.query.conversationId) || 0);
+        const conversations = await conversationService.getUserConversations(userId, { view, conversationId });
         res.status(200).json(conversations);
     } catch (err) {
         console.error("Failed to fetch conversations", err);
