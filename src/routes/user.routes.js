@@ -197,8 +197,11 @@ router.get('/:identifier/profile', authenticate, async (req, res) => {
             }
         }
 
-        // 2b. Check if targetUser has hidden their profile globally
-        if (targetUser && targetUser.preferences?.hideProfileGlobal) {
+        if (!targetUser) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        if (targetUser.preferences?.hideProfileGlobal) {
             return res.status(200).json({
                 isSelf: false,
                 isProfileHidden: true,
@@ -206,7 +209,7 @@ router.get('/:identifier/profile', authenticate, async (req, res) => {
             });
         }
 
-        const targetUserId = targetUser ? targetUser.id : null;
+        const targetUserId = targetUser.id;
 
         // 3. Check connection status (accepted chat request or active conversation)
         let isConnected = false;
@@ -293,6 +296,8 @@ router.get('/:identifier/profile', authenticate, async (req, res) => {
             }
         }
 
+        const isRoomsHidden = !!(targetUser && targetUser.preferences && targetUser.preferences.hideJoinedRooms);
+
         return res.status(200).json({
             isSelf: false,
             isProfileHidden: false,
@@ -307,7 +312,8 @@ router.get('/:identifier/profile', authenticate, async (req, res) => {
                 rooms: roomsCount,
                 replies: repliesCount
             },
-            joinedRooms: targetJoinedRooms
+            joinedRooms: targetJoinedRooms,
+            isRoomsHidden
         });
     } catch (err) {
         console.error('Failed to fetch user profile:', err);
