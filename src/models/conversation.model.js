@@ -30,6 +30,7 @@ const conversationSchema = new mongoose.Schema(
             default: CONVERSATION_STATUS.ACTIVE,
             index: true
         },
+        pausedBy: { type: Number, default: null },
         endedAt: { type: Date, default: null },
         // Stored for moderation only — never exposed to the other participant
         endedBy: { type: Number, default: null, select: false },

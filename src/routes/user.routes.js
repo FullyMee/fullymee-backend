@@ -26,7 +26,7 @@ const profileUpdateSchema = z.object({
     avatar: z.string().trim().max(50).optional(),
 
     // Chat controls
-    chatRequestPermission: z.enum(['everyone', 'nobody']).optional(),
+    chatRequestPermission: z.enum(['rooms', 'nobody']).optional(),
     limitNighttimeRequests: z.boolean().optional(),
 
     // Privacy & Safety
@@ -50,7 +50,7 @@ function formatUserResponse(user, isAdmin) {
         createdAt: user.createdAt,
         preferences: {
             avatar: (user.preferences && user.preferences.avatar) || 'flowing_waterfall',
-            chatRequestPermission: (user.preferences && user.preferences.chatRequestPermission) || 'everyone',
+            chatRequestPermission: (user.preferences && user.preferences.chatRequestPermission) === 'nobody' ? 'nobody' : 'rooms',
             limitNighttimeRequests: !!(user.preferences && user.preferences.limitNighttimeRequests),
             hideJoinedRooms: !!(user.preferences && user.preferences.hideJoinedRooms),
             hideProfileGlobal: !!(user.preferences && user.preferences.hideProfileGlobal),
@@ -264,6 +264,35 @@ router.get('/:identifier/profile', authenticate, async (req, res) => {
             roomsCount = roomsList.length;
         }
 
+        // 5. Fetch active joined rooms for target user (if privacy setting allows)
+        let targetJoinedRooms = [];
+        if (targetUserId && !(targetUser && targetUser.preferences && targetUser.preferences.hideJoinedRooms)) {
+            const ConfessionRoom = require('../models/confessionRoom.model');
+            const activeMemberships = await ConfessionRoomMember.find({
+                userId: targetUserId,
+                isActive: true
+            }).select('roomId').lean();
+
+            if (activeMemberships && activeMemberships.length > 0) {
+                const roomIds = activeMemberships.map((m) => m.roomId);
+                const roomDocs = await ConfessionRoom.find({
+                    id: { $in: roomIds },
+                    isActive: true
+                }).select('id title description category currentUserCount maxCapacity roomType ambienceId').lean();
+
+                targetJoinedRooms = roomDocs.map((r) => ({
+                    roomId: r.id,
+                    title: r.title,
+                    description: r.description || '',
+                    category: r.category || 'general',
+                    currentUserCount: r.currentUserCount || 1,
+                    maxCapacity: r.maxCapacity || 50,
+                    roomType: r.roomType || 'public',
+                    ambienceId: r.ambienceId || null
+                }));
+            }
+        }
+
         return res.status(200).json({
             isSelf: false,
             isProfileHidden: false,
@@ -277,7 +306,8 @@ router.get('/:identifier/profile', authenticate, async (req, res) => {
                 confessions: confessionsCount,
                 rooms: roomsCount,
                 replies: repliesCount
-            }
+            },
+            joinedRooms: targetJoinedRooms
         });
     } catch (err) {
         console.error('Failed to fetch user profile:', err);

@@ -36,7 +36,17 @@ async function getAccessibleConversation(conversationId, userId, { forWrite = fa
         : null;
 
     if (meta && meta.isDeleted) {
-        throw createMessageServiceError('Conversation is no longer available', 410);
+        const updatedMeta = (conversation.participantMeta || []).map((row) => (
+            Number(row.userId) === Number(userId)
+                ? { ...row, isDeleted: false, deletedAt: null, isArchived: false, archivedAt: null }
+                : row
+        ));
+        await Conversation.updateOne(
+            { id: conversation.id },
+            { $set: { participantMeta: updatedMeta } }
+        );
+        meta.isDeleted = false;
+        meta.isArchived = false;
     }
 
     if (conversation.deletedAt) {

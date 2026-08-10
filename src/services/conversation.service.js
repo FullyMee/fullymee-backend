@@ -157,6 +157,7 @@ function sanitizeConversationForViewer(row, viewerUserId) {
         sourceType: row.sourceType || 'direct',
         created_at: row.createdAt,
         status,
+        pausedBy: Number(row.pausedBy || 0) || null,
         endedAt: row.endedAt || null,
         endReason: isEnded ? (row.endReason || END_REASONS.SILENT_EXIT) : null,
         closingNoteId: isEnded ? (row.closingNoteId || null) : null,
@@ -194,13 +195,35 @@ function canRequestReconnect(conversation) {
 }
 
 async function findActiveDmBetween(userA, userB) {
-    return Conversation.findOne({
+    const conv = await Conversation.findOne({
         type: 'dm',
         participants: { $all: [userA, userB], $size: 2 },
         status: CONVERSATION_STATUS.ACTIVE
     })
-        .select({ id: 1, participantDisplayNames: 1, status: 1, _id: 0 })
+        .select({ id: 1, participantDisplayNames: 1, status: 1, participantMeta: 1, _id: 0 })
         .lean();
+
+    if (!conv) return null;
+
+    const uidA = Number(userA);
+    const uidB = Number(userB);
+    const metaA = (conv.participantMeta || []).find(m => Number(m.userId) === uidA);
+    const metaB = (conv.participantMeta || []).find(m => Number(m.userId) === uidB);
+
+    if (metaA?.isDeleted || metaB?.isDeleted) {
+        const updatedMeta = (conv.participantMeta || []).map((row) => {
+            if (row.isDeleted) {
+                return { ...row, isDeleted: false, deletedAt: null, isArchived: false, archivedAt: null };
+            }
+            return row;
+        });
+        await Conversation.updateOne(
+            { id: conv.id },
+            { $set: { participantMeta: updatedMeta } }
+        );
+    }
+
+    return conv;
 }
 
 async function findLatestEndedDmBetween(userA, userB) {
@@ -240,6 +263,7 @@ async function requireParticipantConversation(conversationId, userId, { includeE
         sourceType: 1,
         createdAt: 1,
         status: 1,
+        pausedBy: 1,
         endedAt: 1,
         endReason: 1,
         closingNoteId: 1,
@@ -267,7 +291,17 @@ async function requireParticipantConversation(conversationId, userId, { includeE
 
     const meta = getParticipantMetaForUser(conversation, uid);
     if (meta.isDeleted) {
-        throw createConversationError('CONVERSATION_DELETED', 'Conversation is no longer available.', 410);
+        // Auto-restore conversation when user accesses/messages again from profile or search
+        const updatedMeta = (conversation.participantMeta || []).map((row) => (
+            Number(row.userId) === uid
+                ? { ...row, isDeleted: false, deletedAt: null, isArchived: false, archivedAt: null }
+                : row
+        ));
+        await Conversation.updateOne(
+            { id: conversation.id },
+            { $set: { participantMeta: updatedMeta } }
+        );
+        conversation.participantMeta = updatedMeta;
     }
 
     return conversation;
@@ -350,6 +384,7 @@ exports.createDMConversation = async (userA, userB, options = {}) => {
 exports.getUserConversations = async (userId, options = {}) => {
     const uid = Number(userId);
     const view = String(options.view || 'active').toLowerCase();
+    const targetConversationId = Number(options.conversationId || 0);
 
     const rows = await Conversation.find({ participants: uid })
         .sort({ id: -1 })
@@ -363,6 +398,7 @@ exports.getUserConversations = async (userId, options = {}) => {
             sourceType: 1,
             createdAt: 1,
             status: 1,
+            pausedBy: 1,
             endedAt: 1,
             endReason: 1,
             closingNoteId: 1,
@@ -372,6 +408,27 @@ exports.getUserConversations = async (userId, options = {}) => {
             reconnectBlocked: 1
         })
         .lean();
+
+    // Auto-restore target conversation if deleted when user explicitly requests/accesses it
+    if (targetConversationId) {
+        for (const row of rows) {
+            if (Number(row.id) === targetConversationId) {
+                const meta = (row.participantMeta || []).find(m => Number(m.userId) === uid);
+                if (meta && meta.isDeleted) {
+                    const updatedMeta = (row.participantMeta || []).map((m) => (
+                        Number(m.userId) === uid
+                            ? { ...m, isDeleted: false, deletedAt: null, isArchived: false, archivedAt: null }
+                            : m
+                    ));
+                    await Conversation.updateOne(
+                        { id: row.id },
+                        { $set: { participantMeta: updatedMeta } }
+                    );
+                    row.participantMeta = updatedMeta;
+                }
+            }
+        }
+    }
 
     await attachParticipantAvatars(rows);
 
@@ -601,6 +658,78 @@ exports.createChatRequest = async ({
     }
     if (requesterId === targetId) {
         throw createConversationError('CHAT_REQUEST_TO_SELF', 'You cannot send a chat request to yourself.', 409);
+    }
+
+    // Verify target user's chat request permissions ('rooms' or 'nobody')
+    const targetUserDoc = await User.findOne({ id: targetId }).select('preferences').lean();
+    const targetPermission = (targetUserDoc && targetUserDoc.preferences && targetUserDoc.preferences.chatRequestPermission) === 'nobody' ? 'nobody' : 'rooms';
+
+    if (targetPermission === 'nobody') {
+        throw createConversationError(
+            'CHAT_REQUESTS_DISABLED',
+            'This user has turned off chat requests.',
+            403
+        );
+    }
+
+    if (targetPermission === 'rooms') {
+        const ConfessionRoomMember = require('../models/confessionRoomMember.model');
+
+        // If a specific roomId was provided with the request, check if target and requester are active in that room
+        if (roomId) {
+            const numRoomId = Number(roomId);
+            if (numRoomId) {
+                const targetInSpecificRoom = await ConfessionRoomMember.findOne({
+                    userId: targetId,
+                    roomId: numRoomId,
+                    isActive: true
+                }).select('_id').lean();
+
+                if (!targetInSpecificRoom) {
+                    throw createConversationError(
+                        'CHAT_REQUEST_TARGET_LEFT_ROOM',
+                        'This user is no longer active in this room or has left the room.',
+                        403
+                    );
+                }
+
+                const requesterInSpecificRoom = await ConfessionRoomMember.findOne({
+                    userId: requesterId,
+                    roomId: numRoomId,
+                    isActive: true
+                }).select('_id').lean();
+
+                if (!requesterInSpecificRoom) {
+                    throw createConversationError(
+                        'CHAT_REQUEST_REQUESTER_NOT_IN_ROOM',
+                        'You must be an active member of this room to send a chat request.',
+                        403
+                    );
+                }
+            }
+        }
+
+        // Check overall active room overlap between target and requester
+        const targetRooms = await ConfessionRoomMember.find({ userId: targetId, isActive: true }).select('roomId').lean();
+        if (!targetRooms || targetRooms.length === 0) {
+            throw createConversationError(
+                'CHAT_REQUEST_TARGET_NOT_IN_ROOM',
+                'This user is not currently active in any room. They only accept chat requests from active room members.',
+                403
+            );
+        }
+
+        const targetRoomIds = new Set(targetRooms.map((r) => Number(r.roomId)));
+        const requesterRooms = await ConfessionRoomMember.find({ userId: requesterId, isActive: true }).select('roomId').lean();
+        const hasCommonRoom = (requesterRooms || []).some((r) => targetRoomIds.has(Number(r.roomId)));
+
+        if (!hasCommonRoom) {
+            throw createConversationError(
+                'CHAT_REQUEST_NO_SHARED_ROOM',
+                'This user only accepts chat requests from members currently in the same active room.',
+                403
+            );
+        }
     }
 
     let existingConversation = null;
@@ -980,13 +1109,14 @@ exports.pauseConnection = async ({ userId, conversationId }) => {
 
     await Conversation.updateOne(
         { id: conversation.id },
-        { $set: { status: CONVERSATION_STATUS.PAUSED } }
+        { $set: { status: CONVERSATION_STATUS.PAUSED, pausedBy: uid } }
     );
 
     const updated = await requireParticipantConversation(conversation.id, uid);
     emitConversationLifecycle('conversation_paused', {
         conversationId: updated.id,
         status: CONVERSATION_STATUS.PAUSED,
+        pausedBy: uid,
         participants: updated.participants || []
     });
 
@@ -1009,9 +1139,17 @@ exports.resumeConnection = async ({ userId, conversationId }) => {
         return sanitizeConversationForViewer(conversation, uid);
     }
 
+    if (conversation.pausedBy && Number(conversation.pausedBy) !== uid) {
+        throw createConversationError(
+            'PAUSE_PERMISSION_DENIED',
+            'Only the person who paused this conversation can resume it.',
+            403
+        );
+    }
+
     await Conversation.updateOne(
         { id: conversation.id, status: CONVERSATION_STATUS.PAUSED },
-        { $set: { status: CONVERSATION_STATUS.ACTIVE } }
+        { $set: { status: CONVERSATION_STATUS.ACTIVE, pausedBy: null } }
     );
 
     const updated = await requireParticipantConversation(conversation.id, uid);

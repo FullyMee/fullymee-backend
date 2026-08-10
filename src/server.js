@@ -576,10 +576,13 @@ try {
 
     convService.emitter.on('conversation_paused', (payload) => {
         try {
-            emitToParticipants(payload.participants, 'conversation_paused', {
+            const data = {
                 conversationId: payload.conversationId,
-                status: payload.status
-            });
+                status: payload.status,
+                pausedBy: payload.pausedBy
+            };
+            emitToParticipants(payload.participants, 'conversation_paused', data);
+            ioInst.to(`conversation_${payload.conversationId}`).emit('conversation_paused', data);
         } catch (err) {
             console.error('Error handling conversation_paused emitter:', err);
         }
@@ -587,10 +590,12 @@ try {
 
     convService.emitter.on('conversation_resumed', (payload) => {
         try {
-            emitToParticipants(payload.participants, 'conversation_resumed', {
+            const data = {
                 conversationId: payload.conversationId,
                 status: payload.status
-            });
+            };
+            emitToParticipants(payload.participants, 'conversation_resumed', data);
+            ioInst.to(`conversation_${payload.conversationId}`).emit('conversation_resumed', data);
         } catch (err) {
             console.error('Error handling conversation_resumed emitter:', err);
         }
