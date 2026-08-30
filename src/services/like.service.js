@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const EventEmitter = require('events');
 const { mongoose } = require('../config/db');
 const ConfessionPost = require('../models/confessionPost.model');
@@ -271,7 +272,7 @@ async function createConfession({ content, userId }) {
     }
 
     const confessionId = await getNextSequence('confession_posts');
-    const contentHash = String(Date.now()) + Math.random().toString(36).slice(2, 7);
+    const contentHash = `${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
 
     return ConfessionPost.create({
         id: confessionId,
@@ -424,7 +425,7 @@ async function createReply({ content, userId, confessionId, roomId }) {
     }
 
     const replyId = await getNextSequence('confession_replies');
-    const contentHash = String(Date.now()) + Math.random().toString(36).slice(2, 7);
+    const contentHash = `${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
 
     return ConfessionReply.create({
         id: replyId,

@@ -37,6 +37,24 @@ function getAllowedOrigins() {
 
 const allowedOrigins = getAllowedOrigins();
 
+/* Core Middleware */
+app.use(helmet());
+app.use(compression());
+app.use(cors({
+    origin: function (origin, callback) {
+
+        if (!origin) return callback(null, true);
+
+        if (allowedOrigins.includes(origin)) {
+            return callback(null, true);
+        }
+
+        return callback(null, false);
+    },
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    credentials: true
+}));
+
 /* Health check — supports root /health and /api/health for Render/Uptime monitors & pre-warming */
 app.get(['/health', '/api/health'], (req, res) => {
     res.status(200).json({
@@ -64,24 +82,6 @@ app.get('/ready', async (req, res) => {
 
     res.status(status.status === 'ok' ? 200 : 503).json(status);
 });
-
-/* Core Middleware */
-app.use(helmet());
-app.use(compression());
-app.use(cors({
-    origin: function (origin, callback) {
-
-        if (!origin) return callback(null, true);
-
-        if (allowedOrigins.includes(origin)) {
-            return callback(null, true);
-        }
-
-        return callback(null, false);
-    },
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    credentials: true
-}));
 app.use(express.json({ limit: getJsonBodyLimit() }));
 app.use(express.urlencoded({ extended: false, limit: getJsonBodyLimit() }));
 app.use(verifyCsrfToken);

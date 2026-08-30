@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const { sendOTPEmail } = require('../utils/email.notification');
 
 exports.testEmail = async (req, res) => {
@@ -12,7 +13,7 @@ exports.testEmail = async (req, res) => {
             return res.status(400).json({ error: 'email is required' });
         }
 
-        const testOtp = otp || Math.floor(100000 + Math.random() * 900000).toString();
+        const testOtp = otp || crypto.randomInt(100000, 1000000).toString();
         const result = await sendOTPEmail(email, testOtp);
 
         return res.status(200).json({

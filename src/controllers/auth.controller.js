@@ -157,11 +157,12 @@ exports.refreshSession = async (req, res) => {
 exports.googleSignIn = async (req, res) => {
     try {
         const credential = String((req.body && req.body.credential) || '').trim();
+        const intent = String((req.body && req.body.intent) || '').trim().toLowerCase();
         if (!credential) {
             return res.status(400).json({ error: 'Google credential is required' });
         }
 
-        const { token, user } = await authService.loginWithGoogle(credential);
+        const { token, user } = await authService.loginWithGoogle(credential, intent);
         clearSessionCookies(res);
         issueSessionCookies(res, token, await authService.createRefreshTokenForUser(user.id, user.tokenVersion, req));
         return res.status(200).json({ user });

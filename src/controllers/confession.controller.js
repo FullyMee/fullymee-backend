@@ -473,3 +473,22 @@ exports.listConfessionsFeed = async (req, res) => {
         handleControllerError(res, err, 'Failed to fetch confessions feed');
     }
 };
+
+exports.deleteConfession = async (req, res) => {
+    try {
+        const userId = req.user && req.user.userId;
+        const roomId = req.params.roomId ? Number(req.params.roomId) : null;
+        const confessionId = req.params.confessionId
+            ? Number(req.params.confessionId)
+            : (req.params.id ? Number(req.params.id) : null);
+
+        const result = await confessionService.deleteConfession({
+            userId,
+            roomId,
+            confessionId
+        });
+        res.status(200).json(result);
+    } catch (err) {
+        handleControllerError(res, err, 'Failed to delete confession');
+    }
+};

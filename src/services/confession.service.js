@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const EventEmitter = require('events');
 
 const ConfessionRoom = require('../models/confessionRoom.model');
@@ -49,7 +50,7 @@ function slug(value) {
 }
 
 function generateSixDigitCode() {
-    return String(Math.floor(100000 + Math.random() * 900000));
+    return String(crypto.randomInt(100000, 1000000));
 }
 
 function getDefaultRoomCapacity() {
@@ -216,14 +217,18 @@ function sanitizeRoom(room, alias, { userId = null, includeJoinCode = false } = 
     return safeRoom;
 }
 
-function sanitizeConfession(post, viewerState = {}, avatar = null) {
+function sanitizeConfession(post, viewerState = {}, authorProfile = null) {
     const audioMeta = post && post.audioMeta ? post.audioMeta : {};
     const hasAudio = !!audioMeta.publicId;
+    const authorUsername = (authorProfile && authorProfile.username) || post.alias || 'Anonymous';
+    const authorAvatar = (authorProfile && authorProfile.preferences && authorProfile.preferences.avatar) || (typeof authorProfile === 'string' ? authorProfile : null);
+
     return {
         confessionId: post.id,
         roomId: post.roomId,
-        alias: post.alias,
-        avatar: avatar || null,
+        alias: authorUsername,
+        avatar: authorAvatar || null,
+        author: post.author ? Number(post.author) : null,
         content: post.content || '',
         hasAudio,
         audio: hasAudio || audioMeta.duration ? {
@@ -253,13 +258,17 @@ async function cleanupAudioMeta(audioMeta) {
     }
 }
 
-function sanitizeReply(reply, viewerState = {}, avatar = null) {
+function sanitizeReply(reply, viewerState = {}, authorProfile = null) {
+    const authorUsername = (authorProfile && authorProfile.username) || reply.alias || 'Anonymous';
+    const authorAvatar = (authorProfile && authorProfile.preferences && authorProfile.preferences.avatar) || (typeof authorProfile === 'string' ? authorProfile : null);
+
     return {
         replyId: reply.id,
         confessionId: reply.confessionId,
         roomId: reply.roomId,
-        alias: reply.alias,
-        avatar: avatar || null,
+        alias: authorUsername,
+        avatar: authorAvatar || null,
+        author: reply.author ? Number(reply.author) : null,
         content: reply.content,
         parentReplyId: reply.parentReplyId || null,
         parentAlias: reply.parentAlias || null,
@@ -275,18 +284,22 @@ async function attachAuthorAvatars(items) {
     if (!items || !items.length) return items;
 
     // items could be confessions or replies, they have 'author'
-    const authorIds = [...new Set(items.map(item => Number(item.author)).filter(Boolean))];
+    const authorIds = [...new Set(items.map(item => Number(item.author || item.authorUserId || item.userId)).filter(Boolean))];
     if (!authorIds.length) return items;
 
-    const users = await User.find({ id: { $in: authorIds } }).select({ id: 1, 'preferences.avatar': 1 }).lean();
-    const avatarMap = new Map();
+    const users = await User.find({ id: { $in: authorIds } }).select({ _id: 0, id: 1, username: 1, 'preferences.avatar': 1 }).lean();
+    const userMap = new Map();
     for (const u of users) {
-        avatarMap.set(u.id, u.preferences?.avatar || '🌊');
+        userMap.set(u.id, u);
     }
 
     for (const item of items) {
-        if (item.author && avatarMap.has(Number(item.author))) {
-            item.authorAvatar = avatarMap.get(Number(item.author));
+        const uid = Number(item.author || item.authorUserId || item.userId);
+        if (uid && userMap.has(uid)) {
+            const u = userMap.get(uid);
+            if (u.username) item.alias = u.username;
+            item.authorAvatar = u.preferences?.avatar || null;
+            item.authorProfile = u;
         }
     }
 
@@ -598,12 +611,14 @@ async function listRoomMembers({ userId = null, roomId }) {
 
     const userIds = [...new Set(members.map(m => Number(m.userId)).filter(Boolean))];
     const User = require('../models/user.model');
-    const users = await User.find({ id: { $in: userIds } }).select({ _id: 0, id: 1, 'preferences.avatar': 1 }).lean();
-    const avatarMap = new Map(users.map(u => [u.id, u.preferences?.avatar || null]));
+    const users = await User.find({ id: { $in: userIds } }).select({ _id: 0, id: 1, username: 1, 'preferences.avatar': 1 }).lean();
+    const userMap = new Map(users.map(u => [u.id, u]));
 
     return members.map(member => {
+        const u = userMap.get(Number(member.userId));
         const safe = sanitizeRoomMember(member);
-        safe.avatar = avatarMap.get(safe.userId) || null;
+        if (u && u.username) safe.alias = u.username;
+        safe.avatar = u?.preferences?.avatar || null;
         return safe;
     });
 }
@@ -827,6 +842,19 @@ async function joinRoom({
     let selectedRoom = null;
     let slotReserved = false;
 
+    // Check max joined rooms limit (at most 5 rooms including public and private)
+    const currentJoinedCount = await ConfessionRoomMember.countDocuments({
+        userId: uid,
+        isActive: true
+    });
+    if (currentJoinedCount >= 5) {
+        throw createServiceError(
+            'MAX_ROOMS_REACHED',
+            'You can join max 5 circles at a time.',
+            400
+        );
+    }
+
     if (requestedRoomId) {
         const now = new Date();
         const roomMeta = await ConfessionRoom.findOne({ id: requestedRoomId })
@@ -975,6 +1003,19 @@ async function createRoom({
 
     const normalizedType = roomType === 'private' ? 'private' : 'public';
     const roomTitle = String(title || '').trim();
+
+    // Check max joined rooms limit before creating a new room
+    const currentJoinedCount = await ConfessionRoomMember.countDocuments({
+        userId: uid,
+        isActive: true
+    });
+    if (currentJoinedCount >= 5) {
+        throw createServiceError(
+            'MAX_ROOMS_REACHED',
+            'You can join max 5 rooms at a time.',
+            400
+        );
+    }
     const roomDescription = String(description || '').trim();
     const roomCategory = String(category || '').trim() || 'general';
     const customJoinCode = normalizedType === 'private' ? String(joinCode || '').trim() : '';
@@ -1175,11 +1216,16 @@ async function listPublicRooms({ limit = 100, offset = 0, sortBy = 'discover', s
     };
 
     if (normalizedSearch) {
+        const escaped = normalizedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const flexibleCategory = escaped.replace(/[\s_\-]+/g, '[\\s_\\-]*');
+        const cleanSlugEscaped = escaped.toLowerCase().replace(/[\s_\-]+/g, '_');
+
         query.$and = [{
             $or: [
-                { title: { $regex: normalizedSearch, $options: 'i' } },
-                { description: { $regex: normalizedSearch, $options: 'i' } },
-                { category: { $regex: normalizedSearch, $options: 'i' } }
+                { title: { $regex: escaped, $options: 'i' } },
+                { description: { $regex: escaped, $options: 'i' } },
+                { category: { $regex: flexibleCategory, $options: 'i' } },
+                { category: { $regex: cleanSlugEscaped, $options: 'i' } }
             ]
         }];
     }
@@ -1250,23 +1296,8 @@ async function listMyConfessions({ userId, limit = 50 }) {
     const uid = Number(userId);
     const lim = Number.isFinite(Number(limit)) ? Math.max(1, Math.min(100, Number(limit))) : 50;
 
-    const memberships = await ConfessionRoomMember.find({ userId: uid })
-        .select({ _id: 0, roomId: 1, alias: 1 })
-        .lean();
-
-    if (!memberships.length) return [];
-
-    const conditions = memberships
-        .map((member) => ({
-            roomId: Number(member && member.roomId),
-            alias: String((member && member.alias) || '')
-        }))
-        .filter((item) => Number.isInteger(item.roomId) && item.roomId > 0 && item.alias);
-
-    if (!conditions.length) return [];
-
     const posts = await ConfessionPost.find({
-        $or: conditions,
+        author: uid,
         isPublished: true,
         isHidden: false,
         moderationStatus: { $in: ['approved', 'flagged'] }
@@ -1308,14 +1339,14 @@ async function listMyConfessions({ userId, limit = 50 }) {
 
     const userIds = [...new Set(posts.map(p => Number(p.author)).filter(Boolean))];
     const User = require('../models/user.model');
-    const users = await User.find({ id: { $in: userIds } }).select({ _id: 0, id: 1, 'preferences.avatar': 1 }).lean();
-    const avatarMap = new Map(users.map(u => [u.id, u.preferences?.avatar || null]));
+    const users = await User.find({ id: { $in: userIds } }).select({ _id: 0, id: 1, username: 1, 'preferences.avatar': 1 }).lean();
+    const userMap = new Map(users.map(u => [u.id, u]));
 
     return posts.map((post) => {
         const room = roomMap.get(Number(post.roomId)) || null;
         const viewerState = (viewerStateByRoom.get(Number(post.roomId)) || new Map()).get(Number(post.id)) || {};
         return {
-            ...sanitizeConfession(post, viewerState, avatarMap.get(Number(post.author))),
+            ...sanitizeConfession(post, viewerState, userMap.get(Number(post.author))),
             roomTitle: room && room.title ? room.title : 'Room',
             roomCategory: room && room.category ? room.category : 'general',
             roomMemberCount: room && Number.isFinite(Number(room.currentUserCount)) ? Number(room.currentUserCount) : 0
@@ -1448,8 +1479,8 @@ async function postConfession({ userId, roomId, content, scheduledAt = null, aud
         await incrementRoomMetric(rid, { flags: 1 });
     }
 
-    await attachAuthorAvatars([post]);
-    const safePost = sanitizeConfession(post);
+    const authorUser = await User.findOne({ id: uid }).select({ _id: 0, id: 1, username: 1, 'preferences.avatar': 1 }).lean();
+    const safePost = sanitizeConfession(post, {}, authorUser);
 
     if (scheduledDate) {
         return {
@@ -1457,7 +1488,7 @@ async function postConfession({ userId, roomId, content, scheduledAt = null, aud
             scheduled: {
                 confessionId,
                 scheduledAt: scheduledDate,
-                alias: member.alias,
+                alias: (authorUser && authorUser.username) || member.alias,
                 content: text,
                 audio: audioMeta ? {
                     available: true,
@@ -1481,7 +1512,7 @@ async function postConfession({ userId, roomId, content, scheduledAt = null, aud
     };
 }
 
-async function listConfessions({ userId, roomId, limit = 50, sortBy = 'ranked' }) {
+async function listConfessions({ userId, roomId, limit = 50, sortBy = 'latest' }) {
     const uid = Number(userId);
     const rid = Number(roomId);
     const lim = Number.isFinite(Number(limit)) ? Math.max(1, Math.min(100, Number(limit))) : 50;
@@ -1496,11 +1527,9 @@ async function listConfessions({ userId, roomId, limit = 50, sortBy = 'ranked' }
     })
         .select({ _id: 0 })
         .sort(
-            sortBy === 'latest'
-                ? { createdAt: -1, reactionCount: -1, replyCount: -1, rankingScore: -1 }
-                : sortBy === 'top'
-                    ? { reactionCount: -1, replyCount: -1, createdAt: -1 }
-                    : { rankingScore: -1, createdAt: -1 }
+            sortBy === 'top'
+                ? { reactionCount: -1, replyCount: -1, createdAt: -1 }
+                : { createdAt: -1 }
         )
         .limit(lim)
         .lean();
@@ -1513,25 +1542,10 @@ async function listConfessions({ userId, roomId, limit = 50, sortBy = 'ranked' }
 
     const userIds = [...new Set(posts.map(p => Number(p.author)).filter(Boolean))];
     const User = require('../models/user.model');
-    const users = await User.find({ id: { $in: userIds } }).select({ _id: 0, id: 1, 'preferences.avatar': 1 }).lean();
-    const avatarMap = new Map(users.map(u => [u.id, u.preferences?.avatar || null]));
+    const users = await User.find({ id: { $in: userIds } }).select({ _id: 0, id: 1, username: 1, 'preferences.avatar': 1 }).lean();
+    const userMap = new Map(users.map(u => [u.id, u]));
 
-    if (sortBy === 'latest') {
-        const scored = posts.map((post) => ({
-            ...sanitizeConfession(post, viewerStateMap.get(Number(post.id)) || {}, avatarMap.get(Number(post.author))),
-            _latestScore: computeLatestConfessionScore(post)
-        }));
-        return scored
-            .sort((a, b) => {
-                if ((b._latestScore || 0) !== (a._latestScore || 0)) {
-                    return (b._latestScore || 0) - (a._latestScore || 0);
-                }
-                return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
-            })
-            .map(({ _latestScore, ...rest }) => rest);
-    }
-
-    return posts.map((post) => sanitizeConfession(post, viewerStateMap.get(Number(post.id)) || {}, avatarMap.get(Number(post.author))));
+    return posts.map((post) => sanitizeConfession(post, viewerStateMap.get(Number(post.id)) || {}, userMap.get(Number(post.author))));
 }
 
 async function getAudioUploadToken({ userId, roomId }) {
@@ -1711,7 +1725,8 @@ async function postReply({ userId, roomId, confessionId, content, parentReplyId 
     await incrementRoomMetric(rid, { replies: 1 });
     await updateRoomEngagementRate(rid);
 
-    const safeReply = sanitizeReply(reply);
+    const authorUser = await User.findOne({ id: uid }).select({ _id: 0, id: 1, username: 1, 'preferences.avatar': 1 }).lean();
+    const safeReply = sanitizeReply(reply, {}, authorUser);
     emitter.emit('confession_reply_created', { roomId: rid, confessionId: cid, reply: safeReply });
     return {
         reply: safeReply,
@@ -1746,10 +1761,10 @@ async function listReplies({ userId, roomId, confessionId, limit = 50 }) {
 
     const userIds = [...new Set(replies.map(r => Number(r.author)).filter(Boolean))];
     const User = require('../models/user.model');
-    const users = await User.find({ id: { $in: userIds } }).select({ _id: 0, id: 1, 'preferences.avatar': 1 }).lean();
-    const avatarMap = new Map(users.map(u => [u.id, u.preferences?.avatar || null]));
+    const users = await User.find({ id: { $in: userIds } }).select({ _id: 0, id: 1, username: 1, 'preferences.avatar': 1 }).lean();
+    const userMap = new Map(users.map(u => [u.id, u]));
 
-    return replies.map((reply) => sanitizeReply(reply, viewerStateMap.get(Number(reply.id)) || {}, avatarMap.get(Number(reply.author))));
+    return replies.map((reply) => sanitizeReply(reply, viewerStateMap.get(Number(reply.id)) || {}, userMap.get(Number(reply.author))));
 }
 
 async function reactToTarget({ userId, roomId, targetType, targetId, reactionType }) {
@@ -1864,33 +1879,50 @@ async function sendChatRequestForConfession({ userId, roomId, confessionId }) {
         isHidden: false,
         moderationStatus: { $in: ['approved', 'flagged'] }
     })
-        .select({ _id: 0, alias: 1, content: 1 })
+        .select({ _id: 0, alias: 1, content: 1, author: 1 })
         .lean();
 
     if (!confession) {
         throw createServiceError('CONFESSION_NOT_FOUND', 'Confession not found.', 404);
     }
 
-    const targetMember = await ConfessionRoomMember.findOne({
-        roomId: rid,
-        alias: confession.alias
-    })
-        .select({ _id: 0, userId: 1, alias: 1 })
-        .lean();
+    let targetUserId = Number(confession.author);
+    let targetAlias = confession.alias;
 
-    if (!targetMember || !Number(targetMember.userId)) {
+    if (!targetUserId) {
+        const targetMember = await ConfessionRoomMember.findOne({
+            roomId: rid,
+            alias: confession.alias
+        })
+            .select({ _id: 0, userId: 1, alias: 1 })
+            .lean();
+        if (targetMember && Number(targetMember.userId)) {
+            targetUserId = Number(targetMember.userId);
+            targetAlias = targetMember.alias;
+        }
+    }
+
+    if (!targetUserId) {
         throw createServiceError('CONFESSION_AUTHOR_NOT_FOUND', 'Unable to send a request for this confession.', 404);
     }
 
-    if (Number(targetMember.userId) === uid) {
-        throw createServiceError('CHAT_REQUEST_TO_SELF', 'You cannot send a chat request to your own confession.', 409);
+    if (targetUserId === uid) {
+        throw createServiceError('CHAT_REQUEST_TO_SELF', 'You cannot send a chat request to your own confession.', 400);
     }
+
+    const targetUser = await User.findOne({ id: targetUserId }).select({ _id: 0, id: 1, username: 1, 'preferences.avatar': 1 }).lean();
+    if (targetUser && targetUser.username) {
+        targetAlias = targetUser.username;
+    }
+
+    const requesterUser = await User.findOne({ id: uid }).select({ _id: 0, id: 1, username: 1 }).lean();
+    const requesterAlias = requesterUser?.username || member.alias;
 
     const result = await conversationService.createChatRequest({
         requesterUserId: uid,
-        targetUserId: Number(targetMember.userId),
-        requesterAlias: member.alias,
-        targetAlias: targetMember.alias,
+        targetUserId,
+        requesterAlias,
+        targetAlias,
         roomId: rid,
         confessionId: cid,
         contextType: 'confession',
@@ -1899,7 +1931,7 @@ async function sendChatRequestForConfession({ userId, roomId, confessionId }) {
 
     return {
         confessionId: cid,
-        targetAlias: targetMember.alias,
+        targetAlias,
         conversationId: Number(result && result.conversationId) || null,
         requestState: result && result.requestState ? result.requestState : 'sent'
     };
@@ -2302,8 +2334,8 @@ async function publishScheduledConfession(post) {
     await incrementRoomMetric(rid, { confessions: 1 });
     await updateRoomEngagementRate(rid);
 
-    await attachAuthorAvatars([publishedPost]);
-    const safePost = sanitizeConfession(publishedPost);
+    const authorUser = await User.findOne({ id: Number(publishedPost.author) }).select({ _id: 0, id: 1, username: 1, 'preferences.avatar': 1 }).lean();
+    const safePost = sanitizeConfession(publishedPost, {}, authorUser);
     emitter.emit('confession_created', { roomId: rid, confession: safePost });
     return safePost;
 }
@@ -2326,10 +2358,13 @@ async function listMyScheduledConfessions({ userId, roomId }) {
         .sort({ scheduledAt: 1 })
         .lean();
 
+    const authorUser = await User.findOne({ id: uid }).select({ _id: 0, id: 1, username: 1, 'preferences.avatar': 1 }).lean();
+    const currentUsername = authorUser?.username || null;
+
     return posts.map((post) => ({
         confessionId: post.id,
         content: post.content,
-        alias: post.alias,
+        alias: currentUsername || post.alias,
         scheduledAt: post.scheduledAt,
         scheduleStatus: post.scheduleStatus,
         confirmExpiresAt: post.confirmExpiresAt || null,
@@ -2479,6 +2514,60 @@ async function publishDueScheduledConfessions(getOnlineUsers) {
     return { published, notified };
 }
 
+async function deleteConfession({ userId, roomId = null, confessionId }) {
+    const uid = Number(userId);
+    const cid = Number(confessionId);
+    if (!uid || !cid) {
+        throw createServiceError('INVALID_INPUT', 'Valid confession ID and user session required.', 400);
+    }
+
+    const query = { id: cid, isDeleted: { $ne: true } };
+    if (roomId) query.roomId = Number(roomId);
+
+    const confession = await ConfessionPost.findOne(query);
+    if (!confession) {
+        throw createServiceError('CONFESSION_NOT_FOUND', 'Confession not found or already deleted.', 404);
+    }
+
+    if (Number(confession.author) !== uid) {
+        throw createServiceError('UNAUTHORIZED', 'You are only authorized to delete your own confessions.', 403);
+    }
+
+    await ConfessionPost.updateOne(
+        { id: cid },
+        {
+            $set: {
+                isDeleted: true,
+                deletedAt: new Date(),
+                deletedByAuthor: true,
+                isHidden: true,
+                hiddenReason: 'deleted_by_author'
+            }
+        }
+    );
+
+    if (confession.audioMeta && confession.audioMeta.publicId) {
+        try {
+            await audioService.deleteAudio(confession.audioMeta.publicId);
+        } catch (err) {
+            console.error('Failed to cleanup audio file on soft delete:', err && err.message ? err.message : err);
+        }
+    }
+
+    if (confession.roomId) {
+        try {
+            await ConfessionRoom.updateOne(
+                { id: Number(confession.roomId) },
+                { $inc: { postCount: -1 } }
+            );
+        } catch (err) {
+            console.error('Failed to update room postCount on soft delete:', err);
+        }
+    }
+
+    return { success: true, confessionId: cid, message: 'Confession deleted successfully.' };
+}
+
 module.exports = {
     emitter,
     expireTimedRooms,
@@ -2491,6 +2580,7 @@ module.exports = {
     listMyRooms,
     listMyConfessions,
     postConfession,
+    deleteConfession,
     listConfessions,
     getAudioUploadToken,
     getConfessionAudioUrl,

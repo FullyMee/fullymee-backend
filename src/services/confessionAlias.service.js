@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const ConfessionRoomMember = require('../models/confessionRoomMember.model');
 const {
     mightHaveRoomAlias
@@ -14,11 +15,12 @@ const ANIMALS = [
 ];
 
 function randomFrom(arr) {
-    return arr[Math.floor(Math.random() * arr.length)];
+    if (!arr || !arr.length) return '';
+    return arr[crypto.randomInt(0, arr.length)];
 }
 
 function createAliasCandidate() {
-    const suffix = Math.floor(10 + Math.random() * 90);
+    const suffix = crypto.randomInt(10, 100);
     return `${randomFrom(ADJECTIVES)}${randomFrom(ANIMALS)}${suffix}`;
 }
 

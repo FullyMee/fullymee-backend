@@ -22,6 +22,7 @@ router.get('/rooms/recommendations', authenticate, confessionController.getRecom
 
 router.get('/rooms/:roomId/confessions', authenticate, confessionController.listConfessions);
 router.post('/rooms/:roomId/confessions', authenticate, confessionController.postConfession);
+router.delete('/rooms/:roomId/confessions/:confessionId', authenticate, confessionController.deleteConfession);
 router.get('/rooms/:roomId/confessions/:confessionId/audio-url', authenticate, confessionController.getConfessionAudioUrl);
 
 router.get('/rooms/:roomId/confessions/:confessionId/replies', authenticate, confessionController.listReplies);

@@ -98,7 +98,54 @@ if (!fs.existsSync(RESOURCE_LOG_CSV)) {
 }
 
 const ENQUEUE_MAP = new Map();
+const ENQUEUE_MAP_MAX_SIZE = 10000;
+const ENQUEUE_MAP_TTL_MS = 5 * 60 * 1000;
+
 const PERSIST_METRICS = [];
+const PERSIST_METRICS_MAX_SIZE = 1000;
+
+function pushPersistMetric(entry) {
+    PERSIST_METRICS.push(entry);
+    if (PERSIST_METRICS.length > PERSIST_METRICS_MAX_SIZE) {
+        PERSIST_METRICS.splice(0, PERSIST_METRICS.length - PERSIST_METRICS_MAX_SIZE);
+    }
+}
+
+function setEnqueueTimestamp(id, ts = Date.now()) {
+    if (ENQUEUE_MAP.size >= ENQUEUE_MAP_MAX_SIZE) {
+        const cutoff = Date.now() - ENQUEUE_MAP_TTL_MS;
+        for (const [key, val] of ENQUEUE_MAP.entries()) {
+            if (val < cutoff || ENQUEUE_MAP.size >= ENQUEUE_MAP_MAX_SIZE) {
+                ENQUEUE_MAP.delete(key);
+            }
+        }
+    }
+    ENQUEUE_MAP.set(id, ts);
+}
+
+// Periodic memory eviction routine to eliminate in-memory collection leaks
+setInterval(() => {
+    try {
+        const now = Date.now();
+        const enqueueCutoff = now - ENQUEUE_MAP_TTL_MS;
+        for (const [key, val] of ENQUEUE_MAP.entries()) {
+            if (val < enqueueCutoff) {
+                ENQUEUE_MAP.delete(key);
+            }
+        }
+
+        const rateCutoff = now - 60000;
+        for (const [userId, data] of socketRateMap.entries()) {
+            if (!data || !data.start || data.start < rateCutoff) {
+                socketRateMap.delete(userId);
+            }
+        }
+
+        if (PERSIST_METRICS.length > PERSIST_METRICS_MAX_SIZE) {
+            PERSIST_METRICS.splice(0, PERSIST_METRICS.length - PERSIST_METRICS_MAX_SIZE);
+        }
+    } catch (_) { }
+}, 60000);
 
 // Production-friendly batching defaults
 const MESSAGE_BATCH = {
@@ -165,7 +212,7 @@ async function startPersistWorker() {
                                 const enqueued = ENQUEUE_MAP.get(id);
                                 if (enqueued) {
                                     const latency = now - enqueued;
-                                    PERSIST_METRICS.push({ timestamp: now, messageId: id, latency });
+                                    pushPersistMetric({ timestamp: now, messageId: id, latency });
                                     try { fs.appendFile(PERSIST_LATENCY_CSV, `${now},${id},${latency}\n`, () => { }); } catch (e) { }
                                     ENQUEUE_MAP.delete(id);
                                     try { metrics.recordPersist(latency); } catch (e) { }
@@ -216,7 +263,7 @@ function enqueuePersistMessage(msg) {
     }
     MESSAGE_BATCH.buffer.push(msg);
     try { metrics.recordEnqueue(); } catch (e) { }
-    try { ENQUEUE_MAP.set(msg.id, Date.now()); } catch (e) { }
+    try { setEnqueueTimestamp(msg.id); } catch (e) { }
     try { metrics.setQueueLength(MESSAGE_BATCH.buffer.length); } catch (e) { }
     if (MESSAGE_BATCH.buffer.length >= MESSAGE_BATCH.batchSize) {
         flushPersistBatch().catch((err) => console.error('Batch flush error:', err));
@@ -251,7 +298,7 @@ async function flushPersistBatch() {
                     const enqueued = ENQUEUE_MAP.get(id);
                     if (enqueued) {
                         const latency = foundIds.has(id) ? now - enqueued : -1;
-                        PERSIST_METRICS.push({ timestamp: now, messageId: id, latency });
+                        pushPersistMetric({ timestamp: now, messageId: id, latency });
                         try { fs.appendFile(PERSIST_LATENCY_CSV, `${now},${id},${latency}\n`, () => { }); } catch (e) { }
                         ENQUEUE_MAP.delete(id);
                         try { metrics.recordPersist(latency); } catch (e) { }
@@ -286,7 +333,7 @@ async function flushPersistBatch() {
                         const enqueued = ENQUEUE_MAP.get(id);
                         if (enqueued) {
                             const latency = foundIds.has(id) ? now - enqueued : -1;
-                            PERSIST_METRICS.push({ timestamp: now, messageId: id, latency });
+                            pushPersistMetric({ timestamp: now, messageId: id, latency });
                             try { fs.appendFile(PERSIST_LATENCY_CSV, `${now},${id},${latency}\n`, () => { }); } catch (e) { }
                             ENQUEUE_MAP.delete(id);
                             try { metrics.recordPersist(latency); } catch (e) { }

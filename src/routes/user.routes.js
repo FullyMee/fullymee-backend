@@ -130,6 +130,15 @@ router.put('/preferences', authenticate, async (req, res) => {
             return res.status(404).json({ error: 'User not found' });
         }
 
+        if (updates.username) {
+            await ConfessionRoomMember.updateMany(
+                { userId: req.user.userId },
+                { $set: { alias: updates.username } }
+            ).catch((err) => {
+                console.error('Failed to sync ConfessionRoomMember alias:', err);
+            });
+        }
+
         const hasAdminAccess = updated.role === 'admin' || isConfiguredAdminUser(updated.id);
         return res.status(200).json({ user: formatUserResponse(updated, hasAdminAccess) });
     } catch (err) {
