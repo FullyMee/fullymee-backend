@@ -657,7 +657,7 @@ exports.createChatRequest = async ({
         throw createConversationError('CHAT_REQUEST_INVALID_USERS', 'Unable to create this chat request.', 400);
     }
     if (requesterId === targetId) {
-        throw createConversationError('CHAT_REQUEST_TO_SELF', 'You cannot send a chat request to yourself.', 409);
+        throw createConversationError('CHAT_REQUEST_TO_SELF', 'You cannot send a chat request to yourself.', 400);
     }
 
     // Verify target user's chat request permissions ('rooms' or 'nobody')
@@ -760,6 +760,20 @@ exports.createChatRequest = async ({
         );
     }
 
+    // Prevent next chat request if an outgoing pending request already exists
+    const existingPending = await ChatRequest.findOne({
+        requesterUserId: requesterId,
+        status: 'pending'
+    }).select('id targetAlias').lean();
+
+    if (existingPending) {
+        throw createConversationError(
+            'PENDING_REQUEST_EXISTS',
+            'Pending request already exists.',
+            409
+        );
+    }
+
     let existingRequest = null;
     const requestKey = {
         requesterUserId: requesterId,
@@ -782,9 +796,16 @@ exports.createChatRequest = async ({
 
     if (existingRequest) {
         rememberChatRequest(requestKey);
+        if (existingRequest.status === 'pending') {
+            throw createConversationError(
+                'PENDING_REQUEST_EXISTS',
+                'Pending request already exists.',
+                409
+            );
+        }
         return {
             requestId: existingRequest.id,
-            requestState: existingRequest.status === 'pending' ? 'already_pending' : 'already_connected',
+            requestState: 'already_connected',
             status: existingRequest.status,
             conversationId: existingRequest.conversationId || null,
             targetAlias: existingRequest.targetAlias
@@ -793,20 +814,47 @@ exports.createChatRequest = async ({
 
     const requestId = await getNextSequence('chat_requests');
     const now = new Date();
-    await ChatRequest.create({
-        id: requestId,
-        requesterUserId: requesterId,
-        targetUserId: targetId,
-        requesterAlias: String(requesterAlias || '').trim(),
-        targetAlias: String(targetAlias || '').trim(),
-        roomId: Number(roomId) || null,
-        confessionId: Number(confessionId) || null,
-        contextType: normalizedContextType,
-        contextPreview: trimPreview(contextPreview, 180),
-        status: 'pending',
-        createdAt: now,
-        updatedAt: now
-    });
+    try {
+        await ChatRequest.create({
+            id: requestId,
+            requesterUserId: requesterId,
+            targetUserId: targetId,
+            requesterAlias: String(requesterAlias || '').trim(),
+            targetAlias: String(targetAlias || '').trim(),
+            roomId: Number(roomId) || null,
+            confessionId: Number(confessionId) || null,
+            contextType: normalizedContextType,
+            contextPreview: trimPreview(contextPreview, 180),
+            status: 'pending',
+            createdAt: now,
+            updatedAt: now
+        });
+    } catch (err) {
+        if (err && err.code === 11000) {
+            const existing = await ChatRequest.findOne({
+                requesterUserId: requesterId,
+                targetUserId: targetId,
+                confessionId: Number(confessionId) || null,
+                contextType: normalizedContextType,
+                status: { $in: ['pending', 'accepted'] }
+            })
+                .sort({ createdAt: -1 })
+                .select({ _id: 0 })
+                .lean();
+
+            if (existing) {
+                rememberChatRequest(requestKey);
+                return {
+                    requestId: existing.id,
+                    requestState: existing.status === 'pending' ? 'already_pending' : 'already_connected',
+                    status: existing.status,
+                    conversationId: existing.conversationId || null,
+                    targetAlias: existing.targetAlias || String(targetAlias || '').trim() || 'this user'
+                };
+            }
+        }
+        throw err;
+    }
     rememberChatRequest(requestKey);
 
     try {
@@ -836,7 +884,7 @@ exports.createUserSearchChatRequest = async ({ requesterUserId, targetUserId }) 
         throw createConversationError('CHAT_REQUEST_INVALID_USERS', 'Unable to create this chat request.', 400);
     }
     if (requesterId === targetId) {
-        throw createConversationError('CHAT_REQUEST_TO_SELF', 'You cannot send a chat request to yourself.', 409);
+        throw createConversationError('CHAT_REQUEST_TO_SELF', 'You cannot send a chat request to yourself.', 400);
     }
 
     const [requesterUser, targetUser] = await Promise.all([
@@ -926,7 +974,26 @@ exports.respondToChatRequest = async ({ userId, requestId, action }) => {
         throw createConversationError('CHAT_REQUEST_ALREADY_RESOLVED', 'This chat request has already been handled.', 409);
     }
 
+    const nextStatus = normalizedAction === 'accept' ? 'accepted' : 'declined';
     const now = new Date();
+
+    // Atomic claim of pending status transition
+    const claimedRequest = await ChatRequest.findOneAndUpdate(
+        { id: rid, status: 'pending' },
+        {
+            $set: {
+                status: nextStatus,
+                respondedAt: now,
+                updatedAt: now
+            }
+        },
+        { new: true }
+    ).lean();
+
+    if (!claimedRequest) {
+        throw createConversationError('CHAT_REQUEST_ALREADY_RESOLVED', 'This chat request has already been handled.', 409);
+    }
+
     let conversationId = null;
 
     if (normalizedAction === 'accept') {
@@ -958,20 +1025,14 @@ exports.respondToChatRequest = async ({ userId, requestId, action }) => {
             }
         );
         conversationId = Number(result && result.conversationId) || null;
-    }
 
-    const nextStatus = normalizedAction === 'accept' ? 'accepted' : 'declined';
-    await ChatRequest.updateOne(
-        { id: rid, status: 'pending' },
-        {
-            $set: {
-                status: nextStatus,
-                conversationId,
-                respondedAt: now,
-                updatedAt: now
-            }
+        if (conversationId) {
+            await ChatRequest.updateOne(
+                { id: rid },
+                { $set: { conversationId } }
+            );
         }
-    );
+    }
 
     const updated = await ChatRequest.findOne({ id: rid })
         .select({ _id: 0 })

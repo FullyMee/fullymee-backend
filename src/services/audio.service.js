@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const cloudinary = require('cloudinary').v2;
 const ConfessionPost = require('../models/confessionPost.model');
 
@@ -8,7 +9,7 @@ function envValue(name) {
 const FOLDER = String(process.env.CLOUDINARY_AUDIO_FOLDER || 'fm-audio').trim().replace(/^\/+|\/+$/g, '') || 'fm-audio';
 const FILE_TTL_HOURS = Number(process.env.AUDIO_FILE_TTL_HOURS || 0);
 const PLAY_URL_TTL_HOURS = Number(process.env.AUDIO_PLAY_URL_TTL_HOURS || 4);
-const MAX_BYTES = Number(process.env.AUDIO_MAX_BYTES || 2000000);
+const MAX_BYTES = Number(process.env.AUDIO_MAX_BYTES || 10485760); // 10MB limit
 const MAX_DURATION_SECONDS = Number(process.env.AUDIO_MAX_DURATION_SECONDS || 30);
 const PITCH_OPTIONS = [-400, -350, -300, -250, 250, 300, 350, 400];
 
@@ -40,7 +41,7 @@ function assertConfigured() {
 }
 
 function pickPitchShift() {
-    return PITCH_OPTIONS[Math.floor(Math.random() * PITCH_OPTIONS.length)];
+    return PITCH_OPTIONS[crypto.randomInt(0, PITCH_OPTIONS.length)];
 }
 
 function getContextValue(context, key) {
@@ -139,7 +140,7 @@ async function verifyUploadedAudio({ publicId, userId, roomId, clientDuration = 
         throw createAudioError('INVALID_AUDIO_DURATION', 'Invalid audio duration.', 400);
     }
     if (!Number.isFinite(bytes) || bytes <= 0 || bytes > MAX_BYTES) {
-        throw createAudioError('INVALID_AUDIO_SIZE', 'Invalid audio size.', 400);
+        throw createAudioError('INVALID_AUDIO_SIZE', 'Audio file size must be under 10MB', 400);
     }
 
     const uploadedAt = resource.created_at ? new Date(resource.created_at) : new Date();

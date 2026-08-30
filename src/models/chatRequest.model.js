@@ -23,5 +23,12 @@ const chatRequestSchema = new mongoose.Schema(
 chatRequestSchema.index({ targetUserId: 1, status: 1, createdAt: -1 });
 chatRequestSchema.index({ requesterUserId: 1, status: 1, createdAt: -1 });
 chatRequestSchema.index({ requesterUserId: 1, targetUserId: 1, confessionId: 1, status: 1 });
+chatRequestSchema.index(
+    { requesterUserId: 1, targetUserId: 1, confessionId: 1, contextType: 1 },
+    {
+        unique: true,
+        partialFilterExpression: { status: { $in: ['pending', 'accepted'] } }
+    }
+);
 
 module.exports = mongoose.model('ChatRequest', chatRequestSchema);

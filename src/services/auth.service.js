@@ -56,7 +56,8 @@ function hashRefreshToken(token) {
 }
 
 function randomFrom(values) {
-    return values[Math.floor(Math.random() * values.length)];
+    if (!values || !values.length) return '';
+    return values[crypto.randomInt(0, values.length)];
 }
 
 function getClientIp(req) {
@@ -286,7 +287,10 @@ async function createUserByEmail(email, username) {
             if (err && err.code === 11000) {
                 if (String(err.message || '').toLowerCase().includes('username') || (err.keyPattern && err.keyPattern.username)) {
                     if (hasPreferredUsername) {
-                        throw new Error('Username is not available');
+                        const error = new Error('Username is not available');
+                        error.code = 'USERNAME_UNAVAILABLE';
+                        error.status = 409;
+                        throw error;
                     }
                     candidate = await getUniqueUsername(buildUsernameFromEmail(email, nextId), nextId + attempt);
                     attempt += 1;
@@ -588,7 +592,7 @@ exports.verifyOTP = async (email, otp, usernameInput) => {
     return { token, user };
 };
 
-exports.loginWithGoogle = async (credential) => {
+exports.loginWithGoogle = async (credential, intent = '') => {
     try {
         const { email, googleSub } = await verifyGoogleCredential(credential);
         if (!googleSub) {
@@ -611,6 +615,15 @@ exports.loginWithGoogle = async (credential) => {
         }
 
         let user = googleUser || emailUser;
+
+        const normalizedIntent = String(intent || '').trim().toLowerCase();
+
+        // If intent is 'signin' and user does not exist in database:
+        if (!user && normalizedIntent === 'signin') {
+            const err = new Error('User does not exist, sign up first.');
+            err.code = 'GOOGLE_SIGNIN_NO_ACCOUNT';
+            throw err;
+        }
 
         if (!user) {
             user = await createGoogleUser(email, googleSub);
