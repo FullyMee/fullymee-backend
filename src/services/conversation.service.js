@@ -660,9 +660,10 @@ exports.createChatRequest = async ({
         throw createConversationError('CHAT_REQUEST_TO_SELF', 'You cannot send a chat request to yourself.', 400);
     }
 
-    // Verify target user's chat request permissions ('rooms' or 'nobody')
+    // Verify target user's chat request permissions ('anyone', 'rooms' or 'nobody')
     const targetUserDoc = await User.findOne({ id: targetId }).select('preferences').lean();
-    const targetPermission = (targetUserDoc && targetUserDoc.preferences && targetUserDoc.preferences.chatRequestPermission) === 'nobody' ? 'nobody' : 'rooms';
+    const rawTargetPermission = targetUserDoc && targetUserDoc.preferences && targetUserDoc.preferences.chatRequestPermission;
+    const targetPermission = rawTargetPermission === 'nobody' ? 'nobody' : (rawTargetPermission === 'anyone' ? 'anyone' : 'rooms');
 
     if (targetPermission === 'nobody') {
         throw createConversationError(
@@ -812,6 +813,18 @@ exports.createChatRequest = async ({
         };
     }
 
+    let finalRequesterAlias = String(requesterAlias || '').trim();
+    let finalTargetAlias = String(targetAlias || '').trim();
+
+    if (!finalRequesterAlias) {
+        const reqDoc = await User.findOne({ id: requesterId }).select('username').lean();
+        finalRequesterAlias = (reqDoc && reqDoc.username) || `user_${requesterId}`;
+    }
+    if (!finalTargetAlias) {
+        const tarDoc = await User.findOne({ id: targetId }).select('username').lean();
+        finalTargetAlias = (tarDoc && tarDoc.username) || `user_${targetId}`;
+    }
+
     const requestId = await getNextSequence('chat_requests');
     const now = new Date();
     try {
@@ -819,8 +832,8 @@ exports.createChatRequest = async ({
             id: requestId,
             requesterUserId: requesterId,
             targetUserId: targetId,
-            requesterAlias: String(requesterAlias || '').trim(),
-            targetAlias: String(targetAlias || '').trim(),
+            requesterAlias: finalRequesterAlias,
+            targetAlias: finalTargetAlias,
             roomId: Number(roomId) || null,
             confessionId: Number(confessionId) || null,
             contextType: normalizedContextType,

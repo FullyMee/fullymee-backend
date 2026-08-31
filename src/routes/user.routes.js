@@ -26,7 +26,7 @@ const profileUpdateSchema = z.object({
     avatar: z.string().trim().max(50).optional(),
 
     // Chat controls
-    chatRequestPermission: z.enum(['rooms', 'nobody']).optional(),
+    chatRequestPermission: z.enum(['anyone', 'rooms', 'nobody']).optional(),
     limitNighttimeRequests: z.boolean().optional(),
 
     // Privacy & Safety
@@ -39,6 +39,12 @@ const profileUpdateSchema = z.object({
 // Helper: shape user document into a safe API response object
 // ─────────────────────────────────────────────────────────────────────────────
 
+function normalizeChatRequestPermission(perm) {
+    if (perm === 'nobody') return 'nobody';
+    if (perm === 'anyone') return 'anyone';
+    return 'rooms';
+}
+
 function formatUserResponse(user, isAdmin) {
     return {
         userId: user.id,
@@ -50,7 +56,7 @@ function formatUserResponse(user, isAdmin) {
         createdAt: user.createdAt,
         preferences: {
             avatar: (user.preferences && user.preferences.avatar) || 'flowing_waterfall',
-            chatRequestPermission: (user.preferences && user.preferences.chatRequestPermission) === 'nobody' ? 'nobody' : 'rooms',
+            chatRequestPermission: normalizeChatRequestPermission(user.preferences && user.preferences.chatRequestPermission),
             limitNighttimeRequests: !!(user.preferences && user.preferences.limitNighttimeRequests),
             hideJoinedRooms: !!(user.preferences && user.preferences.hideJoinedRooms),
             hideProfileGlobal: !!(user.preferences && user.preferences.hideProfileGlobal),
