@@ -8,7 +8,7 @@ const preferencesSchema = new mongoose.Schema(
         // Chat Controls
         chatRequestPermission: {
             type: String,
-            enum: ['rooms', 'nobody'],
+            enum: ['anyone', 'rooms', 'nobody'],
             default: 'rooms'
         },
         limitNighttimeRequests: { type: Boolean, default: false },
