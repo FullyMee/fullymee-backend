@@ -2,10 +2,12 @@ const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const { Resend } = require('resend');
 
+/* ─── Singleton Caches ─────────────────────────────────────────────── */
 let resendClient = null;
 let transporter = null;
 let smtpConfig = null;
 
+/* ─── Helpers ──────────────────────────────────────────────────────── */
 function parsePositiveInt(value, fallback) {
     const parsed = Number(value);
     return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
@@ -15,6 +17,46 @@ function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Basic email format guard – prevents obviously invalid addresses from
+ * reaching the provider and burning API quota.
+ */
+function isValidEmailAddress(email) {
+    if (!email || typeof email !== 'string') return false;
+    return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email.trim());
+}
+
+/**
+ * Classify an error as transient (worth retrying) or permanent.
+ * Resend HTTP errors include a `statusCode` on the error object.
+ */
+function isTransientError(err) {
+    if (!err) return false;
+
+    // Resend rate-limit (429) or server errors (5xx)
+    const status = err.statusCode || err.status || (err.resendError && err.resendError.statusCode) || 0;
+    if (status === 429 || (status >= 500 && status < 600)) return true;
+
+    // Network / timeout errors
+    const msg = String(err.message || err.code || '').toLowerCase();
+    if (/timeout|econnreset|econnrefused|enotfound|socket hang up|network|epipe/i.test(msg)) return true;
+
+    return false;
+}
+
+/**
+ * Generate a deterministic idempotency key for a Resend API call so
+ * retries of the same OTP delivery don't produce duplicate sends.
+ */
+function makeIdempotencyKey(to, subject, text) {
+    return crypto
+        .createHash('sha256')
+        .update(`${to}|${subject}|${text}|${Math.floor(Date.now() / 30000)}`)
+        .digest('hex')
+        .slice(0, 48);
+}
+
+/* ─── Provider Factories ───────────────────────────────────────────── */
 function getResendClient() {
     const apiKey = String(process.env.RESEND_API_KEY || '').trim();
     if (!apiKey) return null;
@@ -60,7 +102,7 @@ function getTransporter() {
     if (transporter) return transporter;
 
     const host = getRequiredEnv('SMTP_HOST');
-    const port = Number(process.env.SMTP_PORT || 587);
+    const port = Number(process.env.SMTP_PORT || 465);
     const user = getRequiredEnv('SMTP_USER');
     const rawPass = getRequiredEnv('SMTP_PASS');
     const pass = rawPass.replace(/\s+/g, '');
@@ -75,16 +117,22 @@ function getTransporter() {
     const dkim = getDkimConfig();
     smtpConfig = { host, port, secure, user, dkim: Boolean(dkim) };
 
+    const isProduction = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+
     const transportOptions = {
         host,
         port,
         secure,
         auth: { user, pass },
+        pool: true,                     // Enable connection pooling for throughput
+        maxConnections: 5,
+        maxMessages: 100,
         connectionTimeout: 15000,
         greetingTimeout: 15000,
         socketTimeout: 15000,
         tls: {
-            rejectUnauthorized: false
+            // Enforce TLS certificate validation in production
+            rejectUnauthorized: isProduction
         }
     };
 
@@ -105,6 +153,7 @@ function getSmtpConfig() {
     return smtpConfig;
 }
 
+/* ─── Email HTML Template ──────────────────────────────────────────── */
 function buildOtpEmailHtml({ otp, expiresMin }) {
     const otpSpaced = String(otp || '').split('').join('&nbsp;&nbsp;');
     return `
@@ -189,9 +238,11 @@ function buildOtpEmailHtml({ otp, expiresMin }) {
     `.trim();
 }
 
+/* ─── Resend API Send (Primary) ────────────────────────────────────── */
 async function sendMailViaResend(resend, { from, to, subject, text, html }) {
     const maxAttempts = parsePositiveInt(process.env.EMAIL_SEND_MAX_ATTEMPTS || 3, 3);
     const baseDelayMs = parsePositiveInt(process.env.EMAIL_SEND_RETRY_BASE_MS || 500, 500);
+    const idempotencyKey = makeIdempotencyKey(to, subject, text);
 
     let lastError = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -201,12 +252,16 @@ async function sendMailViaResend(resend, { from, to, subject, text, html }) {
                 to,
                 subject,
                 text,
-                html
+                html,
+                headers: {
+                    'X-Idempotency-Key': idempotencyKey
+                }
             });
 
             if (error) {
                 const err = new Error(error.message || 'Resend email delivery error');
                 err.resendError = error;
+                err.statusCode = error.statusCode || 0;
                 throw err;
             }
 
@@ -217,10 +272,24 @@ async function sendMailViaResend(resend, { from, to, subject, text, html }) {
             };
         } catch (err) {
             lastError = err;
+
+            // Don't retry permanent errors (validation, auth, bad request)
+            if (!isTransientError(err)) {
+                throw err;
+            }
+
             if (attempt >= maxAttempts) {
                 throw err;
             }
-            const backoff = Math.min(6000, baseDelayMs * 2 ** (attempt - 1));
+
+            // Rate-limit: use Retry-After if available, else exponential backoff
+            let backoff;
+            const retryAfter = err.resendError && err.resendError.retryAfter;
+            if (retryAfter && Number(retryAfter) > 0) {
+                backoff = Math.min(30000, Number(retryAfter) * 1000);
+            } else {
+                backoff = Math.min(6000, baseDelayMs * 2 ** (attempt - 1));
+            }
             const jitter = Math.round(backoff * (0.8 + (crypto.randomInt(0, 1000) / 1000) * 0.4));
             await sleep(jitter);
         }
@@ -229,6 +298,7 @@ async function sendMailViaResend(resend, { from, to, subject, text, html }) {
     throw lastError || new Error('Failed to send email via Resend after retries');
 }
 
+/* ─── SMTP Send (Fallback) ─────────────────────────────────────────── */
 async function sendMailViaSmtp(mail) {
     const maxAttempts = parsePositiveInt(process.env.EMAIL_SEND_MAX_ATTEMPTS || 3, 3);
     const baseDelayMs = parsePositiveInt(process.env.EMAIL_SEND_RETRY_BASE_MS || 500, 500);
@@ -261,7 +331,7 @@ async function sendMailViaSmtp(mail) {
                 accepted: [mail.to]
             };
         } catch (err) {
-            transporter = null;
+            transporter = null; // Reset connection on failure
             lastError = err;
             if (attempt >= maxAttempts) {
                 throw err;
@@ -276,7 +346,13 @@ async function sendMailViaSmtp(mail) {
     throw lastError || new Error('Failed to send email via SMTP after retries');
 }
 
+/* ─── Public: Send OTP Email ───────────────────────────────────────── */
 async function sendOTPEmail(email, otp) {
+    // Validate recipient before hitting any provider
+    if (!isValidEmailAddress(email)) {
+        throw new Error('Invalid recipient email address');
+    }
+
     const from = getSender();
     const expiresMin = Number(process.env.OTP_EXPIRES_MIN || 5);
     const subject = process.env.OTP_EMAIL_SUBJECT || 'Your FullyMee verification code';
@@ -295,26 +371,26 @@ async function sendOTPEmail(email, otp) {
     if (resend) {
         try {
             const result = await sendMailViaResend(resend, mailData);
-            console.log(`[Email] OTP sent to ${email} via Resend (ID: ${result.messageId}) from ${from}`);
+            console.log(`[Email] OTP sent to ${email} via Resend API (ID: ${result.messageId}) from ${from}`);
             return result;
         } catch (err) {
-            console.error('Resend delivery failed:', err && err.message ? err.message : err);
+            console.error('[Email] Resend API delivery failed:', err && err.message ? err.message : err);
             // Fall back to SMTP if configured
             if (!process.env.SMTP_HOST) {
                 throw new Error('Failed to send OTP email via Resend');
             }
-            console.warn('Falling back to configured SMTP transport...');
+            console.warn('[Email] Falling back to SMTP transport...');
         }
     }
 
-    // 2. Fallback: Use SMTP if configured
+    // 2. Fallback: Use SMTP if configured (Resend SMTP or any provider)
     if (process.env.SMTP_HOST) {
         try {
             const result = await sendMailViaSmtp(mailData);
             console.log(`[Email] OTP sent to ${email} via SMTP (ID: ${result.messageId}) from ${from}`);
             return result;
         } catch (err) {
-            console.error('SMTP delivery failed:', err && err.message ? err.message : err);
+            console.error('[Email] SMTP delivery failed:', err && err.message ? err.message : err);
             throw new Error('Failed to send OTP email');
         }
     }
@@ -328,6 +404,7 @@ async function sendOTPEmail(email, otp) {
     throw new Error('No email provider configured (RESEND_API_KEY or SMTP_HOST required)');
 }
 
+/* ─── Public: Verify Email Provider Connectivity ───────────────────── */
 async function verifyEmailConnection() {
     const resend = getResendClient();
     if (resend) {
