@@ -1029,22 +1029,41 @@ async function gracefulShutdown(signal) {
 
 async function verifyEmailProviderOnStartup() {
     try {
-        if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
-            console.warn('SMTP is not fully configured. Set SMTP_HOST, SMTP_USER and SMTP_PASS for email OTP delivery.');
+        const hasResendKey = Boolean(String(process.env.RESEND_API_KEY || '').trim());
+        const hasSmtp = Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
+
+        // ── Resend API (Primary) ──
+        if (hasResendKey) {
+            console.log('[Email] ✓ Resend API key configured (primary provider).');
+            console.log(`[Email]   Sender: ${process.env.EMAIL_FROM || process.env.RESEND_FROM || 'default'}`);
         } else {
+            console.warn('[Email] ✗ RESEND_API_KEY not set. Resend API is disabled.');
+        }
+
+        // ── SMTP (Fallback) ──
+        if (hasSmtp) {
             const secure = String(process.env.SMTP_SECURE || '').toLowerCase() === 'true';
-            const port = process.env.SMTP_PORT || '587';
-            console.log(`SMTP configured (host=${process.env.SMTP_HOST}, port=${port}, secure=${secure}).`);
+            const port = process.env.SMTP_PORT || '465';
+            const label = hasResendKey ? 'fallback' : 'primary';
+            console.log(`[Email] ✓ SMTP configured as ${label} (host=${process.env.SMTP_HOST}, port=${port}, secure=${secure}).`);
             try {
                 await verifySMTPConnection();
-                console.log('SMTP connection verified successfully.');
+                console.log('[Email]   SMTP connection verified successfully.');
             } catch (err) {
-                console.error('SMTP verification failed. Check SMTP credentials and provider settings.');
-                console.error('SMTP error:', err && err.message ? err.message : err);
+                console.error('[Email]   SMTP verification failed. Check credentials and provider settings.');
+                console.error('[Email]   SMTP error:', err && err.message ? err.message : err);
             }
+        } else {
+            console.warn('[Email] ✗ SMTP not fully configured (SMTP_HOST, SMTP_USER, SMTP_PASS required for fallback).');
+        }
+
+        // ── No provider at all ──
+        if (!hasResendKey && !hasSmtp) {
+            const level = process.env.NODE_ENV === 'production' ? 'error' : 'warn';
+            console[level]('[Email] ⚠ No email provider configured. OTP delivery will fail in production.');
         }
     } catch (err) {
-        console.error('Email provider startup verification failed:', err && err.message ? err.message : err);
+        console.error('[Email] Provider startup verification failed:', err && err.message ? err.message : err);
     }
 }
 
