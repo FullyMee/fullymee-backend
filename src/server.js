@@ -7,8 +7,8 @@ const Conversation = require('./models/conversation.model');
 const Message = require('./models/message.model');
 const ConversationRead = require('./models/conversationRead.model');
 const { getNextSequence } = require('./utils/sequence');
-const { getMessageExpiresAt } = require('./utils/messageExpiry');
 const { initializeBloomFilters, rememberClientMessageId } = require('./services/bloomFilter.service');
+const messageService = require('./services/message.service');
 
 const { socketMessageSchema, markReadSchema, typingSchema } = require('./validators/socket.validator');
 const { verifySMTPConnection } = require('./utils/email.notification');
@@ -50,18 +50,25 @@ function validateRuntimeConfig() {
     validateCookieConfig();
 }
 
-async function ensureMessageTtlIndex() {
-    const indexes = await Message.collection.indexes();
-    const expiresIndex = indexes.find((idx) => idx.key && idx.key.expiresAt === 1);
-
-    if (expiresIndex && typeof expiresIndex.expireAfterSeconds !== 'number') {
-        await Message.collection.dropIndex(expiresIndex.name);
+async function ensurePermanentMessageStorage() {
+    try {
+        const indexes = await Message.collection.indexes();
+        for (const idx of indexes) {
+            const isTtl = idx.name === 'expiresAt_ttl' || (idx.key && idx.key.expiresAt === 1);
+            const isOldCompound = idx.key && idx.key.conversationId === 1 && idx.key.expiresAt === 1;
+            if (isTtl || isOldCompound) {
+                try {
+                    await Message.collection.dropIndex(idx.name);
+                    console.log(`[PermanentStorage] Dropped legacy expiry index ${idx.name} from messages collection.`);
+                } catch (e) {
+                    console.warn(`[PermanentStorage] Notice dropping index ${idx.name}:`, e.message);
+                }
+            }
+        }
+        await Message.createIndexes();
+    } catch (err) {
+        console.warn('[PermanentStorage] Index check notice:', err.message);
     }
-
-    await Message.collection.createIndex(
-        { expiresAt: 1 },
-        { expireAfterSeconds: 0, name: 'expiresAt_ttl' }
-    );
 }
 
 function getAllowedOrigins() {
@@ -743,15 +750,26 @@ io.on('connection', (socket) => {
             const conversation = await getAccessibleConversation(parsedConversationId, userId);
             if (!conversation) return;
 
-            const rows = await Message.find({
-                conversationId: parsedConversationId,
-                id: { $gt: lastMessageId },
-                expiresAt: { $gt: new Date() }
-            })
-                .sort({ id: 1 })
-                .limit(100)
-                .select({ _id: 0, id: 1, senderId: 1, content: 1, createdAt: 1, expiresAt: 1, clientMessageId: 1 })
-                .lean();
+            const rows = await messageService.fetchMessagesAfter(parsedConversationId, userId, lastMessageId);
+
+            // Mark any missed incoming messages as delivered
+            if (rows && rows.length > 0) {
+                const incomingIds = rows.filter(r => Number(r.senderId) !== Number(userId)).map(r => r.id);
+                if (incomingIds.length > 0) {
+                    messageService.markMessagesDelivered(parsedConversationId, userId, incomingIds)
+                        .then((delivered) => {
+                            for (const item of delivered) {
+                                io.to(`user_${item.senderId}`).emit('message_status_update', {
+                                    conversationId: parsedConversationId,
+                                    messageId: item.messageId,
+                                    status: 'delivered',
+                                    deliveredAt: item.deliveredAt
+                                });
+                            }
+                        })
+                        .catch((e) => console.error('Sync delivery mark error:', e));
+                }
+            }
 
             socket.emit('sync_result', {
                 conversationId: parsedConversationId,
@@ -775,124 +793,119 @@ io.on('connection', (socket) => {
 
             const { clientMessageId, conversationId, content } = parsed.data;
             const senderId = socket.user.userId;
-            const expiresAt = getMessageExpiresAt();
 
-            const conversation = await Conversation.findOne({ id: conversationId })
-                .select({ _id: 0, participants: 1, status: 1, isArchived: 1, deletedAt: 1, participantMeta: 1 })
-                .lean();
-            if (!conversation) {
-                return safeCallback({ status: 'error', message: 'Invalid conversation ID' });
-            }
-
-            const senderNum = Number(senderId);
-            // debug log removed
-            const participantNums = Array.isArray(conversation.participants) ? conversation.participants.map((p) => Number(p)) : [];
-            if (!participantNums.includes(senderNum)) {
-                return safeCallback({ status: 'error', message: 'Not a participant' });
-            }
-
-            const status = conversation.status || 'ACTIVE';
-            if (status === 'ENDED') {
-                return safeCallback({
-                    status: 'conversation_closed',
-                    code: 'CONVERSATION_CLOSED',
-                    message: 'This conversation has come to an end.'
-                });
-            }
-
-            if (status === 'PAUSED') {
-                return safeCallback({
-                    status: 'conversation_paused',
-                    code: 'CONVERSATION_PAUSED',
-                    message: 'This conversation is paused.'
-                });
-            }
-
-            if (conversation.deletedAt) {
-                return safeCallback({ status: 'error', message: 'Conversation deleted' });
-            }
-
+            // Direct durable persistence in MongoDB first (guaranteed zero message loss)
+            let savedMessage;
             try {
-                // Pre-allocate an id and enqueue the message for batched persistence.
-                const messageId = await getNextSequence('messages');
-                const createdAt = new Date();
-                const messageDoc = {
-                    id: messageId,
+                savedMessage = await messageService.createMessage(
                     conversationId,
                     senderId,
                     content,
-                    expiresAt,
-                    clientMessageId: clientMessageId || null,
-                    createdAt
-                };
-
-                // enqueue for bulk persistence (returns false when queue is full)
-                const enqueued = enqueuePersistMessage(messageDoc);
-                if (!enqueued) {
-                    return safeCallback({ status: 'rate_limited' });
-                }
-
-                // remember clientMessageId in bloom filter/cache
-                if (clientMessageId) rememberClientMessageId(clientMessageId);
-
-                const payload = {
-                    id: messageId,
-                    clientMessageId,
-                    conversationId,
-                    senderId,
-                    content,
-                    createdAt,
-                    expiresAt
-                };
-
-                for (const participantId of new Set(conversation.participants || [])) {
-                    io.to(`user_${participantId}`).emit('receive_message', payload);
-
-                    if (Number(participantId) !== Number(senderId)) {
-                        io.to(`user_${participantId}`).emit('unread_update', { conversationId });
-                    }
-                }
-
-                return safeCallback({ status: 'delivered', messageId, clientMessageId });
-            } catch (err) {
-                if (err && err.code === 11000) {
-                    try {
-                        console.error('Duplicate key error inserting message', {
-                            code: err.code,
-                            keyPattern: err.keyPattern,
-                            keyValue: err.keyValue,
-                            message: String(err.message || '')
-                        });
-                    } catch (logErr) { }
-                }
-
-                // If duplicate is due to clientMessageId, return the existing message id (idempotent retry)
-                if (err && err.code === 11000 && String(err.message || '').includes('clientMessageId')) {
-                    try {
-                        const existing = await Message.findOne({ clientMessageId }).select({ id: 1 }).lean();
-                        if (existing && existing.id) {
-                            return safeCallback({
-                                status: 'delivered',
-                                messageId: existing.id,
-                                clientMessageId
-                            });
-                        }
-                    } catch (lookupErr) {
-                        console.error('Error looking up existing message after duplicate key', lookupErr);
-                    }
-
-                    // fallback: inform client the duplicate was ignored
+                    clientMessageId || null
+                );
+            } catch (createErr) {
+                if (createErr && createErr.code === 'CONVERSATION_CLOSED') {
                     return safeCallback({
-                        status: 'duplicate_ignored',
-                        clientMessageId
+                        status: 'conversation_closed',
+                        code: 'CONVERSATION_CLOSED',
+                        message: 'This conversation has come to an end.'
                     });
                 }
+                if (createErr && createErr.code === 'CONVERSATION_PAUSED') {
+                    return safeCallback({
+                        status: 'conversation_paused',
+                        code: 'CONVERSATION_PAUSED',
+                        message: 'This conversation is paused.'
+                    });
+                }
+                if (createErr && Number.isFinite(createErr.status)) {
+                    return safeCallback({ status: 'error', message: createErr.message });
+                }
+                throw createErr;
+            }
 
-                throw err;
+            const conversation = await Conversation.findOne({ id: conversationId })
+                .select({ _id: 0, participants: 1 })
+                .lean();
+
+            const participants = (conversation && conversation.participants) || [];
+
+            // Check if any recipient is actively connected in their user room
+            let recipientConnected = false;
+            for (const participantId of new Set(participants)) {
+                if (Number(participantId) !== Number(senderId)) {
+                    const room = io.sockets.adapter.rooms.get(`user_${participantId}`);
+                    if (room && room.size > 0) {
+                        recipientConnected = true;
+                    }
+                }
+            }
+
+            // If recipient is connected, update message to delivered immediately
+            let currentStatus = savedMessage.status || 'sent';
+            let deliveredAt = savedMessage.deliveredAt || null;
+            if (recipientConnected && currentStatus === 'sent') {
+                const deliveredList = await messageService.markMessagesDelivered(conversationId, senderId, [savedMessage.id]);
+                if (deliveredList && deliveredList.length > 0) {
+                    currentStatus = 'delivered';
+                    deliveredAt = deliveredList[0].deliveredAt;
+                }
+            }
+
+            const payload = {
+                id: savedMessage.id,
+                seq: savedMessage.seq,
+                clientMessageId: savedMessage.clientMessageId,
+                conversationId: savedMessage.conversationId,
+                senderId: savedMessage.senderId,
+                content: savedMessage.content,
+                status: currentStatus,
+                createdAt: savedMessage.createdAt,
+                deliveredAt,
+                readAt: savedMessage.readAt || null
+            };
+
+            for (const participantId of new Set(participants)) {
+                io.to(`user_${participantId}`).emit('receive_message', payload);
+
+                if (Number(participantId) !== Number(senderId)) {
+                    io.to(`user_${participantId}`).emit('unread_update', { conversationId });
+                }
+            }
+
+            // Acknowledge back to sender with durable message data
+            return safeCallback({
+                status: currentStatus,
+                messageId: savedMessage.id,
+                seq: savedMessage.seq,
+                clientMessageId: savedMessage.clientMessageId,
+                message: payload
+            });
+        } catch (err) {
+            console.error('Message send error:', err);
+            return safeCallback({ status: 'failed' });
+        }
+    });
+
+    socket.on('message_delivered', async (data) => {
+        try {
+            if (!data) return;
+            const conversationId = Number(data.conversationId);
+            const messageId = Number(data.messageId);
+            const messageIds = Array.isArray(data.messageIds) ? data.messageIds : (messageId ? [messageId] : null);
+            if (!conversationId) return;
+
+            const delivered = await messageService.markMessagesDelivered(conversationId, userId, messageIds);
+            for (const item of delivered) {
+                io.to(`user_${item.senderId}`).emit('message_status_update', {
+                    conversationId,
+                    messageId: item.messageId,
+                    status: 'delivered',
+                    deliveredAt: item.deliveredAt
+                });
             }
         } catch (err) {
-            console.error('Message reliability error:', err);
-            return safeCallback({ status: 'failed' });
+            console.error('message_delivered error:', err);
         }
     });
 
@@ -918,8 +931,25 @@ io.on('connection', (socket) => {
                 { upsert: true, new: true, setDefaultsOnInsert: true }
             );
 
+            const readItems = await messageService.markMessagesRead(conversationId, userId, messageId);
+
             socket.to(`conversation_${conversationId}`).emit('read_update', { userId, messageId });
             io.to(`conversation_${conversationId}`).emit('unread_reset', { conversationId, userId });
+            io.to(`user_${userId}`).emit('unread_reset', { conversationId, userId });
+
+            // Notify senders that their messages are now READ
+            const sendersNotified = new Set();
+            for (const item of readItems) {
+                if (!sendersNotified.has(item.senderId)) {
+                    sendersNotified.add(item.senderId);
+                    io.to(`user_${item.senderId}`).emit('message_status_update', {
+                        conversationId,
+                        upToMessageId: messageId,
+                        status: 'read',
+                        readAt: item.readAt
+                    });
+                }
+            }
         } catch (err) {
             console.error('Read update error:', err);
         }
@@ -1073,7 +1103,7 @@ async function startServer() {
     try {
         await connectDB();
         await initializeIdentityData();
-        await ensureMessageTtlIndex();
+        await ensurePermanentMessageStorage();
         console.log('MongoDB connection verified successfully.');
     } catch (err) {
         console.error('MongoDB connection failed. Check MONGODB_URI and network access.');

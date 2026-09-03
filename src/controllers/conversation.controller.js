@@ -1,4 +1,8 @@
 const conversationService = require("../services/conversation.service");
+const messageService = require("../services/message.service");
+const Conversation = require("../models/conversation.model");
+const ConversationRead = require("../models/conversationRead.model");
+const Message = require("../models/message.model");
 
 exports.createDM = async (req, res) => {
     return res.status(403).json({
@@ -20,6 +24,54 @@ exports.getUnread = async (req, res) => {
         res.status(500).json({
             error: "Failed to fetch unread counts"
         });
+    }
+};
+
+exports.markRead = async (req, res) => {
+    try {
+        const userId = Number(req.user && req.user.userId);
+        const conversationId = Number(req.params.conversationId);
+        const messageId = req.body && req.body.messageId ? Number(req.body.messageId) : null;
+
+        if (!userId || !conversationId) {
+            return res.status(400).json({ error: "Invalid conversation or user ID" });
+        }
+
+        const conversation = await Conversation.findOne({
+            id: conversationId,
+            participants: userId,
+            deletedAt: null
+        }).lean();
+
+        if (!conversation) {
+            return res.status(404).json({ error: "Conversation not found or access denied" });
+        }
+
+        let targetMessageId = messageId;
+        if (!targetMessageId) {
+            const latest = await Message.findOne({ conversationId }).sort({ id: -1 }).select({ id: 1 }).lean();
+            targetMessageId = (latest && latest.id) || 0;
+        }
+
+        if (targetMessageId > 0) {
+            await ConversationRead.findOneAndUpdate(
+                { conversationId, userId },
+                {
+                    conversationId,
+                    userId,
+                    lastReadMessageId: targetMessageId,
+                    updatedAt: new Date()
+                },
+                { upsert: true, new: true, setDefaultsOnInsert: true }
+            );
+
+            await messageService.markMessagesRead(conversationId, userId, targetMessageId);
+        }
+
+        res.status(200).json({ success: true, conversationId, lastReadMessageId: targetMessageId });
+    } catch (err) {
+        console.error("Mark Read Error:", err);
+        res.status(500).json({ error: "Failed to mark messages as read" });
     }
 };
 

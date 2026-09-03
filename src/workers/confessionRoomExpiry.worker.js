@@ -10,12 +10,8 @@ cron.schedule('* * * * *', async () => {
     try {
         const startedAt = Date.now();
         const expiredCount = await confessionService.expireTimedRooms();
-        const inactiveCount = await confessionService.expireInactivePublicRoomMembers();
         if (expiredCount > 0) {
             console.log(`Confession Room Expiry -> expired ${expiredCount} timed room(s)`);
-        }
-        if (inactiveCount > 0) {
-            console.log(`Confession Room Expiry -> auto-left ${inactiveCount} inactive public room member(s)`);
         }
 
         const elapsedMs = Date.now() - startedAt;

@@ -120,7 +120,7 @@ async function seed() {
 
     for (let i = 0; i < ROOM_DATA.length; i++) {
         const item = ROOM_DATA[i];
-        const shouldKeepJoined = i < 15; // First 15 joined by user, remaining 35 unjoined (discoverable)
+        const shouldKeepJoined = i < 3; // Keep at most 3 rooms joined initially, strictly adhering to max 5 room limit
         const categoryKey = item.category.toLowerCase().replace(/\s+/g, '_');
         const titleSlug = item.title.toLowerCase().replace(/[^a-z0-9]+/g, '-');
         const roomFamilyKey = `public:${categoryKey}:${titleSlug}`;

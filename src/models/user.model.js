@@ -9,7 +9,7 @@ const preferencesSchema = new mongoose.Schema(
         chatRequestPermission: {
             type: String,
             enum: ['anyone', 'rooms', 'nobody'],
-            default: 'rooms'
+            default: 'anyone'
         },
         limitNighttimeRequests: { type: Boolean, default: false },
 

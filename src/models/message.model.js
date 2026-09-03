@@ -6,16 +6,24 @@ const messageSchema = new mongoose.Schema(
         conversationId: { type: Number, required: true, index: true },
         senderId: { type: Number, required: true, index: true },
         content: { type: String, required: true },
+        seq: { type: Number, default: 0, index: true },
+        status: { type: String, enum: ['sent', 'delivered', 'read'], default: 'sent', index: true },
         createdAt: { type: Date, default: Date.now },
-        expiresAt: { type: Date, required: true },
+        deliveredAt: { type: Date, default: null },
+        readAt: { type: Date, default: null },
+        expiresAt: { type: Date, default: null },
         clientMessageId: { type: String, trim: true, default: null }
     },
     { versionKey: false }
 );
 
 messageSchema.index({ clientMessageId: 1 }, { unique: true, sparse: true });
+messageSchema.index({ conversationId: 1, seq: 1 });
+messageSchema.index({ conversationId: 1, seq: -1 });
 messageSchema.index({ conversationId: 1, id: -1 });
-messageSchema.index({ conversationId: 1, expiresAt: 1, id: -1 });
-messageSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0, name: 'expiresAt_ttl' });
+messageSchema.index({ conversationId: 1, id: 1 });
+messageSchema.index({ conversationId: 1, id: 1, senderId: 1, status: 1 });
+messageSchema.index({ conversationId: 1, status: 1 });
+messageSchema.index({ conversationId: 1, createdAt: 1 });
 
 module.exports = mongoose.model('Message', messageSchema);

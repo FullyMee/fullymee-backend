@@ -14,6 +14,7 @@ router.post('/requests/:requestId/respond', authenticate, conversationController
 /* Silent Exit / Manage Connection */
 router.get('/closing-notes', authenticate, conversationController.getClosingNotes);
 router.get('/:conversationId', authenticate, conversationController.getConversation);
+router.post('/:conversationId/read', authenticate, conversationController.markRead);
 router.post('/:conversationId/end', authenticate, conversationController.endConnection);
 router.post('/:conversationId/pause', authenticate, conversationController.pauseConnection);
 router.post('/:conversationId/resume', authenticate, conversationController.resumeConnection);
