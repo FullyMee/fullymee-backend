@@ -1,7 +1,6 @@
 const Message = require('../models/message.model');
 const Conversation = require('../models/conversation.model');
 const { getNextSequence } = require('../utils/sequence');
-const { getMessageExpiresAt } = require('../utils/messageExpiry');
 const { rememberClientMessageId } = require('./bloomFilter.service');
 
 function createMessageServiceError(message, status = 400) {
@@ -74,16 +73,52 @@ async function getAccessibleConversation(conversationId, userId, { forWrite = fa
 exports.createMessage = async (conversationId, senderId, content, clientMessageId = null) => {
     await getAccessibleConversation(conversationId, senderId, { forWrite: true });
 
-    const expiresAt = getMessageExpiresAt();
+    // Idempotency check: if clientMessageId already exists, return the existing message
+    if (clientMessageId) {
+        const existing = await Message.findOne({ clientMessageId })
+            .select({ _id: 0, id: 1, seq: 1, conversationId: 1, senderId: 1, content: 1, status: 1, createdAt: 1, deliveredAt: 1, readAt: 1, clientMessageId: 1 })
+            .lean();
+        if (existing) {
+            rememberClientMessageId(clientMessageId);
+            return existing;
+        }
+    }
+
+    // Atomic conversation-level monotonic sequence counter
+    const conv = await Conversation.findOneAndUpdate(
+        { id: Number(conversationId) },
+        { $inc: { lastMessageSeq: 1 } },
+        { new: true }
+    );
+    const seq = (conv && conv.lastMessageSeq) || 1;
+
     const id = await getNextSequence('messages');
-    await Message.create({
-        id,
-        conversationId,
-        senderId,
-        content,
-        expiresAt,
-        clientMessageId: clientMessageId || null
-    });
+    const createdAt = new Date();
+
+    try {
+        await Message.create({
+            id,
+            seq,
+            conversationId: Number(conversationId),
+            senderId: Number(senderId),
+            content,
+            status: 'sent',
+            clientMessageId: clientMessageId || null,
+            createdAt
+        });
+    } catch (err) {
+        // Race condition duplicate check: if concurrent request inserted same clientMessageId
+        if (err && err.code === 11000 && clientMessageId) {
+            const existing = await Message.findOne({ clientMessageId })
+                .select({ _id: 0, id: 1, seq: 1, conversationId: 1, senderId: 1, content: 1, status: 1, createdAt: 1, deliveredAt: 1, readAt: 1, clientMessageId: 1 })
+                .lean();
+            if (existing) {
+                rememberClientMessageId(clientMessageId);
+                return existing;
+            }
+        }
+        throw err;
+    }
 
     if (clientMessageId) {
         rememberClientMessageId(clientMessageId);
@@ -91,52 +126,113 @@ exports.createMessage = async (conversationId, senderId, content, clientMessageI
 
     return {
         id,
-        conversationId,
-        senderId,
+        seq,
+        conversationId: Number(conversationId),
+        senderId: Number(senderId),
         content,
-        expiresAt,
+        status: 'sent',
+        createdAt,
+        deliveredAt: null,
+        readAt: null,
         clientMessageId
     };
 };
 
-exports.fetchMessages = async (conversationId, userId, limit = null) => {
+exports.fetchMessages = async (conversationId, userId, options = {}) => {
     // Reads remain allowed after Silent Exit so both sides can see history + closing state
     await getAccessibleConversation(conversationId, userId, { forWrite: false });
 
-    const query = Message.find({
-        conversationId,
-        expiresAt: { $gt: new Date() }
-    })
-        .select({ _id: 0, id: 1, senderId: 1, content: 1, createdAt: 1, expiresAt: 1, clientMessageId: 1 });
+    const limit = typeof options === 'number' ? options : (options && options.limit);
+    const before = options && options.before !== undefined && options.before !== null ? Number(options.before) : null;
+    const after = options && options.after !== undefined && options.after !== null ? Number(options.after) : null;
 
-    const normalizedLimit = Number(limit);
-    if (Number.isFinite(normalizedLimit) && normalizedLimit > 0) {
-        const rows = await query
-            .sort({ id: -1 })
-            .limit(Math.min(100, Math.floor(normalizedLimit)))
-            .lean();
-        return rows.reverse();
+    const queryFilter = { conversationId: Number(conversationId) };
+    if (before !== null && Number.isFinite(before)) {
+        queryFilter.id = { $lt: before };
+    } else if (after !== null && Number.isFinite(after)) {
+        queryFilter.id = { $gt: after };
     }
 
-    const rows = await query
-        .sort({ id: 1 })
-        .lean();
+    const query = Message.find(queryFilter)
+        .select({ _id: 0, id: 1, seq: 1, senderId: 1, content: 1, status: 1, createdAt: 1, deliveredAt: 1, readAt: 1, clientMessageId: 1 });
 
-    return rows;
+    const normalizedLimit = Number(limit);
+    const maxLimit = Number.isFinite(normalizedLimit) && normalizedLimit > 0
+        ? Math.min(100, Math.floor(normalizedLimit))
+        : 50;
+
+    if (after !== null && Number.isFinite(after)) {
+        const rows = await query.sort({ seq: 1, id: 1 }).limit(maxLimit).lean();
+        return rows;
+    }
+
+    // Default or "before": fetch newest first, then reverse so result is chronological
+    const rows = await query.sort({ seq: -1, id: -1 }).limit(maxLimit).lean();
+    return rows.reverse();
 };
 
 exports.fetchMessagesAfter = async (conversationId, userId, lastMessageId) => {
     await getAccessibleConversation(conversationId, userId, { forWrite: false });
 
     const rows = await Message.find({
-        conversationId,
-        id: { $gt: lastMessageId },
-        expiresAt: { $gt: new Date() }
+        conversationId: Number(conversationId),
+        id: { $gt: Number(lastMessageId || 0) }
     })
-        .sort({ id: 1 })
+        .sort({ seq: 1, id: 1 })
         .limit(100)
-        .select({ _id: 0, id: 1, senderId: 1, content: 1, createdAt: 1, expiresAt: 1, clientMessageId: 1 })
+        .select({ _id: 0, id: 1, seq: 1, senderId: 1, content: 1, status: 1, createdAt: 1, deliveredAt: 1, readAt: 1, clientMessageId: 1 })
         .lean();
 
     return rows;
+};
+
+exports.markMessagesDelivered = async (conversationId, recipientUserId, messageIds = null) => {
+    const filter = {
+        conversationId: Number(conversationId),
+        senderId: { $ne: Number(recipientUserId) },
+        status: 'sent'
+    };
+
+    if (Array.isArray(messageIds) && messageIds.length > 0) {
+        const validIds = messageIds.map(Number).filter(id => Number.isFinite(id) && id > 0);
+        if (validIds.length > 0) {
+            filter.id = { $in: validIds };
+        }
+    }
+
+    const now = new Date();
+    const toUpdate = await Message.find(filter).select({ _id: 0, id: 1, senderId: 1 }).lean();
+    if (!toUpdate.length) return [];
+
+    const ids = toUpdate.map(m => m.id);
+    await Message.updateMany(
+        { id: { $in: ids } },
+        { $set: { status: 'delivered', deliveredAt: now } }
+    );
+
+    return toUpdate.map(m => ({ messageId: m.id, senderId: m.senderId, deliveredAt: now }));
+};
+
+exports.markMessagesRead = async (conversationId, readerUserId, upToMessageId) => {
+    const maxId = Number(upToMessageId || 0);
+    if (!maxId) return [];
+
+    const filter = {
+        conversationId: Number(conversationId),
+        id: { $lte: maxId },
+        senderId: { $ne: Number(readerUserId) },
+        status: { $ne: 'read' }
+    };
+
+    const now = new Date();
+    const toUpdate = await Message.find(filter).select({ _id: 0, id: 1, senderId: 1 }).lean();
+    if (!toUpdate.length) return [];
+
+    const ids = toUpdate.map(m => m.id);
+    await Message.updateMany(
+        { id: { $in: ids } },
+        { $set: { status: 'read', readAt: now } }
+    );
+
+    return toUpdate.map(m => ({ messageId: m.id, senderId: m.senderId, readAt: now }));
 };

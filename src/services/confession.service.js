@@ -497,93 +497,11 @@ async function expireTimedRooms() {
 }
 
 async function expireInactivePublicRoomMembers() {
-    const now = new Date();
-    const cutoff = new Date(now.getTime() - getPublicRoomInactivityMinutes() * 60 * 1000);
-
-    const staleMembers = await ConfessionRoomMember.find({
-        isActive: true,
-        lastActiveAt: { $lte: cutoff }
-    })
-        .select({ _id: 0, roomId: 1, joinedAt: 1 })
-        .lean();
-
-    if (!staleMembers.length) return 0;
-
-    const staleRoomIds = [...new Set(staleMembers.map((member) => Number(member && member.roomId)).filter(Boolean))];
-    if (!staleRoomIds.length) return 0;
-
-    const publicRooms = await ConfessionRoom.find({
-        id: { $in: staleRoomIds },
-        isActive: true,
-        roomType: 'public',
-        $or: [{ expiresAt: null }, { expiresAt: { $gt: now } }]
-    })
-        .select({ _id: 0, id: 1, currentUserCount: 1 })
-        .lean();
-
-    if (!publicRooms.length) return 0;
-
-    const activePublicRoomIds = new Set(publicRooms.map((room) => Number(room && room.id)).filter(Boolean));
-    const targetMembers = staleMembers.filter((member) => activePublicRoomIds.has(Number(member && member.roomId)));
-    if (!targetMembers.length) return 0;
-
-    await ConfessionRoomMember.updateMany(
-        {
-            roomId: { $in: [...activePublicRoomIds] },
-            isActive: true,
-            lastActiveAt: { $lte: cutoff }
-        },
-        {
-            $set: {
-                isActive: false,
-                leftAt: now,
-                lastActiveAt: now
-            }
-        }
-    );
-
-    const roomStats = new Map();
-    for (const member of targetMembers) {
-        const roomId = Number(member && member.roomId);
-        if (!roomId) continue;
-
-        const existing = roomStats.get(roomId) || { count: 0, totalSessionSeconds: 0 };
-        existing.count += 1;
-        existing.totalSessionSeconds += Math.max(
-            1,
-            Math.floor((now.getTime() - new Date(member.joinedAt || now).getTime()) / 1000)
-        );
-        roomStats.set(roomId, existing);
-    }
-
-    const updatedRoomCounts = new Map(publicRooms.map((room) => [Number(room.id), Number(room.currentUserCount || 0)]));
-    for (const [roomId, stats] of roomStats.entries()) {
-        await ConfessionRoom.updateOne(
-            { id: roomId, currentUserCount: { $gt: 0 } },
-            {
-                $inc: { currentUserCount: -stats.count },
-                $set: { updatedAt: now }
-            }
-        );
-
-        const nextCount = Math.max(0, Number(updatedRoomCounts.get(roomId) || 0) - stats.count);
-        updatedRoomCounts.set(roomId, nextCount);
-
-        await incrementRoomMetric(
-            roomId,
-            { leaves: stats.count, totalSessionSeconds: stats.totalSessionSeconds },
-            { snapshotActiveUsers: nextCount }
-        );
-        await updateRoomEngagementRate(roomId);
-
-        emitter.emit('confession_room_left', {
-            roomId,
-            currentUserCount: nextCount
-        });
-    }
-
-    return targetMembers.length;
+    // Inactivity expiry disabled: users remain joined to Fume Circles indefinitely despite inactivity.
+    // Members are only removed when they explicitly leave the room (leaveRoom) or if a timed room expires.
+    return 0;
 }
+
 
 async function getUserActiveRooms(userId) {
     return ConfessionRoomMember.find({ userId: Number(userId), isActive: true })
@@ -965,6 +883,27 @@ async function joinRoom({
         }
     }
 
+    // Concurrency double-check safeguard: ensure user never ends up with > 5 active rooms
+    const activeCountAfter = await ConfessionRoomMember.countDocuments({
+        userId: uid,
+        isActive: true
+    });
+    if (activeCountAfter > 5) {
+        await ConfessionRoomMember.updateOne(
+            { roomId: selectedRoom.id, userId: uid },
+            { $set: { isActive: false, leftAt: new Date() } }
+        );
+        await ConfessionRoom.updateOne(
+            { id: selectedRoom.id, currentUserCount: { $gt: 0 } },
+            { $inc: { currentUserCount: -1 } }
+        );
+        throw createServiceError(
+            'MAX_ROOMS_REACHED',
+            'You can join max 5 circles at a time.',
+            400
+        );
+    }
+
     await incrementRoomMetric(selectedRoom.id, { joins: 1 }, { snapshotActiveUsers: selectedRoom.currentUserCount });
     await updateRoomEngagementRate(selectedRoom.id);
 
@@ -1012,7 +951,7 @@ async function createRoom({
     if (currentJoinedCount >= 5) {
         throw createServiceError(
             'MAX_ROOMS_REACHED',
-            'You can join max 5 rooms at a time.',
+            'You can join max 5 circles at a time.',
             400
         );
     }
@@ -1175,9 +1114,28 @@ async function leaveRoom({ userId, roomId }) {
 
 async function listMyRooms({ userId }) {
     const uid = Number(userId);
-    const memberships = await ConfessionRoomMember.find({ userId: uid, isActive: true })
+    const allMemberships = await ConfessionRoomMember.find({ userId: uid, isActive: true })
         .select({ _id: 0, roomId: 1, alias: 1, joinedAt: 1 })
+        .sort({ joinedAt: -1 })
         .lean();
+
+    if (!allMemberships.length) return [];
+
+    // Self-healing: if database somehow has > 5 active rooms, prune the excess immediately
+    if (allMemberships.length > 5) {
+        const excess = allMemberships.slice(5);
+        const excessRoomIds = excess.map((m) => m.roomId);
+        ConfessionRoomMember.updateMany(
+            { userId: uid, roomId: { $in: excessRoomIds } },
+            { $set: { isActive: false, leftAt: new Date() } }
+        ).catch(() => {});
+        ConfessionRoom.updateMany(
+            { id: { $in: excessRoomIds }, currentUserCount: { $gt: 0 } },
+            { $inc: { currentUserCount: -1 } }
+        ).catch(() => {});
+    }
+
+    const memberships = allMemberships.slice(0, 5);
 
     if (!memberships.length) return [];
     const roomIds = memberships.map((row) => row.roomId);
@@ -1211,23 +1169,72 @@ async function listPublicRooms({ limit = 100, offset = 0, sortBy = 'discover', s
     const query = {
         isActive: true,
         roomType: 'public',
-        $expr: { $lt: ['$currentUserCount', '$maxCapacity'] },
+        $expr: { $lt: ['$currentUserCount', '$maxCapacity'] }
+    };
+
+    const expirationClause = {
         $or: [{ expiresAt: null }, { expiresAt: { $gt: now } }]
     };
 
     if (normalizedSearch) {
-        const escaped = normalizedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const flexibleCategory = escaped.replace(/[\s_\-]+/g, '[\\s_\\-]*');
-        const cleanSlugEscaped = escaped.toLowerCase().replace(/[\s_\-]+/g, '_');
+        const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const STOP_WORDS = new Set(['circle', 'circles', 'room', 'rooms', 'fume', 'fumes', 'space', 'spaces', 'and', 'the', 'a', 'an', 'in', 'of', 'for', 'to']);
 
-        query.$and = [{
-            $or: [
-                { title: { $regex: escaped, $options: 'i' } },
-                { description: { $regex: escaped, $options: 'i' } },
-                { category: { $regex: flexibleCategory, $options: 'i' } },
-                { category: { $regex: cleanSlugEscaped, $options: 'i' } }
-            ]
-        }];
+        const rawWords = normalizedSearch.toLowerCase().split(/[\s_\-&,]+/).filter(Boolean);
+        let searchTokens = rawWords.filter(w => !STOP_WORDS.has(w));
+        if (searchTokens.length === 0) {
+            searchTokens = rawWords;
+        }
+
+        function getVariants(word) {
+            const set = new Set([word]);
+            if (word.endsWith('ies') && word.length > 3) {
+                set.add(word.slice(0, -3) + 'y');
+            } else if (word.endsWith('es') && word.length > 3) {
+                set.add(word.slice(0, -2));
+                set.add(word.slice(0, -1));
+            } else if (word.endsWith('s') && word.length > 2) {
+                set.add(word.slice(0, -1));
+            } else {
+                set.add(word + 's');
+                set.add(word + 'es');
+            }
+            return Array.from(set);
+        }
+
+        const exactEscaped = escapeRegex(normalizedSearch);
+        const exactFlexible = exactEscaped.replace(/[\s_\-]+/g, '[\\s_\\-]*');
+        const exactRegex = { $regex: exactFlexible, $options: 'i' };
+
+        const tokenClauses = searchTokens.map((tok) => {
+            const variants = getVariants(tok);
+            const escapedVariants = variants.map(escapeRegex);
+            const pattern = escapedVariants.join('|');
+            const regex = { $regex: pattern, $options: 'i' };
+            return {
+                $or: [
+                    { title: regex },
+                    { description: regex },
+                    { category: regex },
+                    { tags: { $elemMatch: { $regex: pattern, $options: 'i' } } }
+                ]
+            };
+        });
+
+        query.$and = [
+            expirationClause,
+            {
+                $or: [
+                    { title: exactRegex },
+                    { category: exactRegex },
+                    { description: exactRegex },
+                    { tags: { $elemMatch: exactRegex } },
+                    { $and: tokenClauses }
+                ]
+            }
+        ];
+    } else {
+        query.$or = expirationClause.$or;
     }
 
     const selectFields = {

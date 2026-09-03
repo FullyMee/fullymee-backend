@@ -22,6 +22,7 @@ const conversationSchema = new mongoose.Schema(
         participantMeta: { type: [participantMetaSchema], default: [] },
         sourceType: { type: String, enum: ['direct', 'chat_request'], default: 'direct' },
         createdAt: { type: Date, default: Date.now },
+        lastMessageSeq: { type: Number, default: 0 },
 
         // Connection lifecycle (Silent Exit)
         status: {

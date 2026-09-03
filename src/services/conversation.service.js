@@ -478,12 +478,14 @@ exports.getReadState = async (conversationId) => {
 };
 
 exports.getUnreadCounts = async (userId) => {
-    const now = new Date();
+    const parsedUserId = Number(userId);
+    if (!parsedUserId || Number.isNaN(parsedUserId)) return [];
+
     const rows = await Conversation.aggregate([
         {
             $match: {
-                participants: userId,
-                status: CONVERSATION_STATUS.ACTIVE
+                participants: parsedUserId,
+                deletedAt: null
             }
         },
         { $project: { _id: 0, id: 1, participantMeta: 1 } },
@@ -494,7 +496,7 @@ exports.getUnreadCounts = async (userId) => {
                         $filter: {
                             input: { $ifNull: ['$participantMeta', []] },
                             as: 'meta',
-                            cond: { $eq: ['$$meta.userId', userId] }
+                            cond: { $eq: ['$$meta.userId', parsedUserId] }
                         }
                     }
                 }
@@ -505,7 +507,6 @@ exports.getUnreadCounts = async (userId) => {
                 $or: [
                     { viewerMeta: { $eq: null } },
                     {
-                        'viewerMeta.isArchived': { $ne: true },
                         'viewerMeta.isDeleted': { $ne: true }
                     }
                 ]
@@ -521,7 +522,7 @@ exports.getUnreadCounts = async (userId) => {
                             $expr: {
                                 $and: [
                                     { $eq: ['$conversationId', '$$conversationId'] },
-                                    { $eq: ['$userId', userId] }
+                                    { $eq: ['$userId', parsedUserId] }
                                 ]
                             }
                         }
@@ -549,7 +550,8 @@ exports.getUnreadCounts = async (userId) => {
                                 $and: [
                                     { $eq: ['$conversationId', '$$conversationId'] },
                                     { $gt: ['$id', '$$lastRead'] },
-                                    { $gt: ['$expiresAt', now] }
+                                    { $ne: ['$senderId', parsedUserId] },
+                                    { $ne: ['$status', 'read'] }
                                 ]
                             }
                         }
@@ -663,7 +665,7 @@ exports.createChatRequest = async ({
     // Verify target user's chat request permissions ('anyone', 'rooms' or 'nobody')
     const targetUserDoc = await User.findOne({ id: targetId }).select('preferences').lean();
     const rawTargetPermission = targetUserDoc && targetUserDoc.preferences && targetUserDoc.preferences.chatRequestPermission;
-    const targetPermission = rawTargetPermission === 'nobody' ? 'nobody' : (rawTargetPermission === 'anyone' ? 'anyone' : 'rooms');
+    const targetPermission = rawTargetPermission === 'nobody' ? 'nobody' : (rawTargetPermission === 'rooms' ? 'rooms' : 'anyone');
 
     if (targetPermission === 'nobody') {
         throw createConversationError(
