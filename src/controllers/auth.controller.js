@@ -233,22 +233,29 @@ exports.getSocketToken = async (req, res) => {
 exports.getAllUsers = async (req, res) => {
     try {
         const userId = req.user && req.user.userId;
-        const query = String((req.query && req.query.q) || (req.query && req.query.search) || '').trim();
+        const numericUserId = Number(userId);
+        const rawQuery = String((req.query && req.query.q) || (req.query && req.query.search) || '').trim();
+        const cleanQuery = rawQuery.replace(/^@+/, '').trim();
         const requestedLimit = Math.max(1, Math.min(100, Number(req.query && req.query.limit ? req.query.limit : 10) || 10));
         const offset = Math.max(0, Math.floor(Number(req.query && req.query.offset ? req.query.offset : 0) || 0));
         const paginate = String((req.query && req.query.paginate) || '').toLowerCase() === '1' || String((req.query && req.query.paginate) || '').toLowerCase() === 'true';
 
-        // Include all users in search (including self) — but exclude profiles
-        // hidden globally UNLESS it's the viewer's own profile
+        // Base filter: must have a non-empty username and respect privacy settings
         const filter = {
-            $or: [
-                { id: userId },                                    // always include self
-                { 'preferences.hideProfileGlobal': { $ne: true } } // include non-hidden others
-            ]
+            username: { $exists: true, $nin: [null, ''] }
         };
 
-        if (query) {
-            filter.username = { $regex: query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' };
+        if (Number.isFinite(numericUserId) && numericUserId > 0) {
+            filter.$or = [
+                { id: numericUserId },
+                { 'preferences.hideProfileGlobal': { $ne: true } }
+            ];
+        } else {
+            filter['preferences.hideProfileGlobal'] = { $ne: true };
+        }
+
+        if (cleanQuery) {
+            filter.username = { $regex: cleanQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' };
         }
 
         const rows = await User.find(filter)
@@ -260,8 +267,9 @@ exports.getAllUsers = async (req, res) => {
 
         const mappedRows = rows.map(row => ({
             id: row.id,
+            userId: row.id,
             username: row.username,
-            avatar: row.preferences?.avatar || null
+            avatar: (row.preferences && row.preferences.avatar) || 'flowing_waterfall'
         }));
 
         if (paginate) {
