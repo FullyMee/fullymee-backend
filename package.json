@@ -5,6 +5,8 @@
   "scripts": {
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "smoke:rate-limit": "node scripts/rate_limit_smoke_test.js",
     "smoke:frontend-retry": "node --experimental-fetch scripts/frontend_api_retry_test.mjs",
     "smoke:auth-production": "node scripts/auth_production_smoke_test.js",
@@ -41,6 +43,8 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "nodemon": "^3.1.14"
+    "nodemon": "^3.1.14",
+    "supertest": "^7.3.1",
+    "vitest": "^5.0.5"
   }
 }

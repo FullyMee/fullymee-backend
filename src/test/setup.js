@@ -1,0 +1,10 @@
+process.env.NODE_ENV = 'test';
+process.env.JWT_SECRET = 'super-secret-test-jwt-key-for-fullymee-12345';
+process.env.JWT_REFRESH_SECRET = 'super-secret-test-refresh-jwt-key-67890';
+process.env.CSRF_SECRET = 'super-secret-csrf-test-key-abcde';
+process.env.ADMIN_USER_IDS = 'admin-user-id-1,admin-user-id-2';
+process.env.ADMIN_EMAILS = 'admin@fullymee.com,super@fullymee.com';
+process.env.TRUST_PROXY = '1';
+process.env.AUTH_COOKIE_NAME = 'auth_token';
+process.env.REFRESH_COOKIE_NAME = 'refresh_token';
+process.env.CSRF_COOKIE_NAME = 'csrf_token';
