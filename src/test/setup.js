@@ -8,3 +8,9 @@ process.env.TRUST_PROXY = '1';
 process.env.AUTH_COOKIE_NAME = 'auth_token';
 process.env.REFRESH_COOKIE_NAME = 'refresh_token';
 process.env.CSRF_COOKIE_NAME = 'csrf_token';
+
+// Stub database ping & connect in test environment so tests don't require external MongoDB
+const db = require('../config/db');
+db.pingDB = async () => true;
+db.connectDB = async () => db.mongoose.connection;
+

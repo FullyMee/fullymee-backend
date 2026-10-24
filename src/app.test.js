@@ -2,11 +2,6 @@ import { describe, it, expect, vi } from 'vitest';
 const request = require('supertest');
 const app = require('./app');
 
-// Mock pingDB to avoid real DB connections during health integration test
-vi.mock('./config/db', () => ({
-    pingDB: vi.fn().mockResolvedValue(true)
-}));
-
 describe('Express app root endpoints and security integration', () => {
     describe('GET /health and /api/health', () => {
         it('returns 200 with status ok and uptime on /health', async () => {
