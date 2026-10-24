@@ -47,4 +47,14 @@ describe('Express app root endpoints and security integration', () => {
             expect(res.body).toEqual({ error: 'Route not found' });
         });
     });
+
+    describe('GET /api/auth/csrf', () => {
+        it('generates a 64-char hex CSRF token using crypto and sets cookie', async () => {
+            const res = await request(app).get('/api/auth/csrf');
+            expect(res.status).toBe(200);
+            expect(typeof res.body.csrfToken).toBe('string');
+            expect(res.body.csrfToken).toMatch(/^[a-f0-9]{64}$/);
+            expect(res.headers['set-cookie']).toBeDefined();
+        });
+    });
 });
