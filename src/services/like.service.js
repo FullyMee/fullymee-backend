@@ -1,4 +1,3 @@
-const crypto = require('crypto');
 const EventEmitter = require('events');
 const { mongoose } = require('../config/db');
 const ConfessionPost = require('../models/confessionPost.model');
