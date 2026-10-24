@@ -1,4 +1,3 @@
-const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 
 const AUTH_COOKIE_NAME = process.env.AUTH_COOKIE_NAME || 'auth_token';

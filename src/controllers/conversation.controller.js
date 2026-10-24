@@ -2,7 +2,6 @@ const conversationService = require("../services/conversation.service");
 const messageService = require("../services/message.service");
 const Conversation = require("../models/conversation.model");
 const ConversationRead = require("../models/conversationRead.model");
-const Message = require("../models/message.model");
 
 exports.createDM = async (req, res) => {
     return res.status(403).json({

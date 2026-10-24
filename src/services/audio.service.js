@@ -1,4 +1,3 @@
-const crypto = require('crypto');
 const cloudinary = require('cloudinary').v2;
 const ConfessionPost = require('../models/confessionPost.model');
 

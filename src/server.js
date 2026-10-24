@@ -16,10 +16,6 @@ const { getSocketToken, verifyAuthToken } = require('./utils/authToken');
 const { registerConfessionSocket } = require('./sockets/confession.socket');
 const { initializeIdentityData } = require('./services/auth.service');
 
-if (String(process.env.ENABLE_MESSAGE_CLEANUP_WORKER || '').toLowerCase() === 'true') {
-    require('./workers/expiry.worker');
-}
-
 if (String(process.env.ENABLE_CONFESSION_ROOM_EXPIRY_WORKER || '').toLowerCase() === 'true') {
     require('./workers/confessionRoomExpiry.worker');
 }

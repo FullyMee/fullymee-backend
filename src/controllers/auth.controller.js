@@ -1,12 +1,9 @@
-const crypto = require('crypto');
 const authService = require('../services/auth.service');
-const User = require('../models/user.model');
 const {
     setAuthCookie,
     setRefreshCookie,
     setCsrfCookie,
     clearSessionCookies,
-    signAuthToken,
     getCookieValue
 } = require('../utils/authToken');
 
